@@ -1,6 +1,7 @@
 """Terminal entry point.
 
-`tracker sync | sync-all | stats | reprice | serve | card | backup | schedule render | collectors`
+`tracker init | open | sync | sync-all | stats | reprice | serve | card | backup | schedule render |
+collectors`
 """
 
 from __future__ import annotations
@@ -318,6 +319,17 @@ def serve(
     ),
 ) -> None:
     """Serve the dashboard on http://127.0.0.1:PORT (foreground; Ctrl+C to stop)."""
+    _refuse_non_loopback(host)
+    _load_pricing(pricing_path)  # fail fast on a missing or broken --pricing file
+    if not Path(db).exists():
+        console.print(f"[yellow]No ledger at {db} yet - the dashboard will be empty until you sync.[/yellow]")
+
+    bind = _bind_address(host)
+    console.print(f"Dashboard: [bold cyan]{_dashboard_url(bind, port)}[/bold cyan]  (Ctrl+C to stop)")
+    _run_server(db, pricing_path, subscriptions, sources, bind, port)
+
+
+def _refuse_non_loopback(host: str) -> None:
     from lifelong_tracker.web.security import is_loopback_host
 
     if not is_loopback_host(host):
@@ -326,17 +338,23 @@ def serve(
             f"(127.0.0.1, ::1 or localhost).[/red]"
         )
         raise typer.Exit(2)
-    _load_pricing(pricing_path)  # fail fast on a missing or broken --pricing file
-    if not Path(db).exists():
-        console.print(f"[yellow]No ledger at {db} yet - the dashboard will be empty until you sync.[/yellow]")
 
+
+def _bind_address(host: str) -> str:
+    return "127.0.0.1" if host.strip().lower() == "localhost" else host.strip().strip("[]")
+
+
+def _dashboard_url(bind: str, port: int) -> str:
+    from lifelong_tracker.launcher import dashboard_url
+
+    return dashboard_url(bind, port)
+
+
+def _run_server(db: Path, pricing_path: Path, subscriptions: Path, sources: Path, bind: str, port: int) -> None:
     import uvicorn
 
     from lifelong_tracker.web.app import create_app
 
-    bind = "127.0.0.1" if host.strip().lower() == "localhost" else host.strip("[]")
-    shown = f"[{bind}]" if ":" in bind else bind
-    console.print(f"Dashboard: [bold cyan]http://{shown}:{port}[/bold cyan]  (Ctrl+C to stop)")
     uvicorn.run(
         create_app(Path(db), Path(pricing_path), subscriptions_path=Path(subscriptions),
                    sources_path=Path(sources), pricing_seed=pricing_seed(Path(pricing_path))),
@@ -347,6 +365,196 @@ def serve(
         server_header=False,
         proxy_headers=False,
     )
+
+
+# --------------------------------------------------------------------------- init
+
+@app.command("init")
+def init_cmd(
+    out: Path = typer.Option(DEFAULT_SOURCES_PATH, "--out", "-o", dir_okay=False,
+                             help="Config file to create."),
+    force: bool = typer.Option(False, "--force", help="Replace an existing config file."),
+) -> None:
+    """Create sources.json by answering a few questions (nothing is scanned or read)."""
+    from lifelong_tracker import setup_wizard as wiz
+    from lifelong_tracker.collectors import tool_label
+    from lifelong_tracker.schedule import detect_platform
+    from lifelong_tracker.sources import BILLING_MODES, BILLING_SUBSCRIPTION
+
+    out = Path(out)
+    if out.exists() and not force:
+        console.print(f"[yellow]{out} already exists - nothing was changed. "
+                      f"Use --force to replace it, or --out to write somewhere else.[/yellow]", soft_wrap=True)
+        raise typer.Exit(1)
+
+    platform = detect_platform()
+    console.print(Panel.fit(
+        "Answer a few questions to create [bold]sources.json[/bold].\n"
+        "Press Enter to accept the value in \\[brackets].\n"
+        "Paths are only written to the file, not opened or checked now;\n"
+        "`tracker sync-all` reports any that are missing.",
+        title="Lifelong AI Tracker setup", border_style="cyan",
+    ))
+    choices = []
+    defaults = wiz.tool_defaults(platform)
+    for i, d in enumerate(defaults, start=1):
+        label = tool_label(d.tool)
+        console.print(f"\n[bold][{i}/{len(defaults)}] {label}[/bold]  [dim]default location: {d.hint}[/dim]",
+                      highlight=False)
+        if not typer.confirm(f"  Do you use {label}?", default=False):
+            choices.append(wiz.Choice(d.tool, False, d.path))
+            continue
+        while True:
+            raw = typer.prompt("  Path (Enter = default)", default=d.path)
+            try:
+                path = wiz.normalize_path(raw)
+                break
+            except ValueError as exc:
+                console.print(f"  [red]{exc}[/red]")
+        while True:
+            billing = typer.prompt("  Billing: subscription (flat plan) or api (pay-as-you-go key)",
+                                   default=BILLING_SUBSCRIPTION).strip().lower()
+            if billing in BILLING_MODES:
+                break
+            console.print(f"  [red]Type {' or '.join(BILLING_MODES)} (got {billing!r}).[/red]", highlight=False)
+        choices.append(wiz.Choice(d.tool, True, path, billing))
+
+    text = wiz.render_config(wiz.build_config(choices))
+    try:
+        wiz.write_config(out, text, force=force)
+    except FileExistsError:
+        console.print(f"[yellow]{out} was created meanwhile - nothing was changed.[/yellow]", soft_wrap=True)
+        raise typer.Exit(1) from None
+    except OSError as exc:
+        console.print(f"[red]Cannot write {out}: {exc}[/red]", soft_wrap=True)
+        raise typer.Exit(2) from exc
+
+    console.print(f"\n[green]Wrote {out}[/green]", soft_wrap=True, highlight=False)
+    t = Table(header_style="bold", box=box.SIMPLE_HEAD)
+    t.add_column("Tool")
+    t.add_column("Status")
+    t.add_column("Path")
+    t.add_column("Billing")
+    for c in choices:
+        t.add_row(tool_label(c.tool), "[green]enabled[/green]" if c.enabled else "[dim]skipped[/dim]",
+                  c.path, c.billing if c.enabled else "-")
+    console.print(t)
+    if any(c.enabled for c in choices):
+        console.print("Next: [bold]tracker open[/bold] syncs these sources and opens the dashboard.")
+    else:
+        console.print("[yellow]No tool enabled - edit the file or run `tracker init --force` later.[/yellow]")
+
+
+# --------------------------------------------------------------------------- open
+
+def _quiet_sync(sources: Path, db: Path, pricing: PricingTable) -> str:
+    """Sync every enabled source; return a one-line summary (never raises for source errors)."""
+    from lifelong_tracker.sources import SourcesConfigError, load_sources, sync_all
+
+    try:
+        specs = load_sources(sources)
+    except SourcesConfigError as exc:
+        return f"[yellow]Sync skipped - sources config error: {exc}[/yellow]"
+    try:
+        with connect(db) as conn:
+            results = sync_all(conn, specs, pricing)
+    except sqlite3.Error as exc:
+        return f"[red]Sync skipped - cannot open ledger {db}: {exc}[/red]"
+    ok = [r for r in results if r.status == "ok"]
+    failed = [r for r in results if r.status == "failed"]
+    if not ok and not failed:
+        return "[yellow]Sync: no enabled sources in the config.[/yellow]"
+    new = sum(r.report.upsert.inserted for r in ok if r.report)
+    upd = sum(r.report.upsert.updated for r in ok if r.report)
+    line = (f"Synced {len(ok)} source{'s' if len(ok) != 1 else ''}: "
+            f"{new:,} new / {upd:,} updated events")
+    if failed:
+        names = ", ".join(r.spec.name for r in failed)
+        return f"[yellow]{line}; {len(failed)} failed ({names}) - run `tracker sync-all` for details[/yellow]"
+    return f"[green]{line}[/green]"
+
+
+def _event_count(db: Path) -> int:
+    try:
+        with connect_readonly(db) as conn:
+            return conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    except sqlite3.Error:
+        return 0
+
+
+@app.command("open")
+def open_cmd(
+    sources: Path = typer.Option(DEFAULT_SOURCES_PATH, "--sources", dir_okay=False,
+                                 help="sources.json to sync first (skipped if it does not exist)."),
+    db: Path = DbOpt,
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address (loopback only)."),
+    port: int = typer.Option(8765, "--port", min=1, max=65535, help="TCP port."),
+    app_window: bool = typer.Option(False, "--app",
+                                    help="Open a standalone app window (Chrome / Edge / Brave / Arc)."),
+    no_sync: bool = typer.Option(False, "--no-sync", help="Do not sync before starting."),
+    no_browser: bool = typer.Option(False, "--no-browser", help="Do not open a browser window."),
+    pricing_path: Path = PricingOpt,
+    subscriptions: Path = typer.Option(
+        DEFAULT_SUBSCRIPTIONS_PATH, "--subscriptions", dir_okay=False,
+        help="subscriptions.json holding monthly plan fees (created on first save).",
+    ),
+) -> None:
+    """Sync, start the dashboard and open it in a browser (Ctrl+C to stop)."""
+    import threading
+
+    from lifelong_tracker import launcher
+    from lifelong_tracker.schedule import detect_platform
+
+    _refuse_non_loopback(host)
+    bind = _bind_address(host)
+    url = launcher.dashboard_url(bind, port)
+    pricing = _load_pricing(pricing_path)
+    if launcher.port_accepts(bind, port):
+        console.print(f"[red]Port {port} on {bind} is already in use (is the dashboard already open?). "
+                      f"Visit {url} or choose another --port.[/red]", soft_wrap=True)
+        raise typer.Exit(2)
+
+    if not no_sync:
+        if Path(sources).is_file():
+            console.print(_quiet_sync(Path(sources), Path(db), pricing), soft_wrap=True, highlight=False)
+        else:
+            console.print(f"[dim]No {Path(sources).name} - run `tracker init` to choose what to track.[/dim]",
+                          highlight=False)
+
+    browser = launcher.find_chromium(detect_platform()) if (app_window and not no_browser) else None
+    if no_browser:
+        opens = "not opened (--no-browser)"
+    elif browser is not None:
+        opens = f"{browser.name} app window"
+    elif app_window:
+        opens = "default browser (no Chrome / Edge / Brave / Arc found)"
+    else:
+        opens = "default browser"
+    body = Table.grid(padding=(0, 2))
+    body.add_column(style="bold")
+    body.add_column()
+    body.add_row("Dashboard", f"[bold cyan]{url}[/bold cyan]")
+    body.add_row("Events", f"{_event_count(Path(db)):,}")
+    body.add_row("Opens in", opens)
+    body.add_row("Stop", "Press Ctrl+C")
+    console.print(Panel(body, title="Lifelong AI Tracker", border_style="cyan", expand=False))
+
+    stop = threading.Event()
+    opener = None
+    if not no_browser:
+        def report(how: str) -> None:
+            if how == "failed":
+                console.print(f"[yellow]Could not open a browser - visit {url}[/yellow]", highlight=False)
+            elif how == "not-ready":
+                console.print(f"[yellow]The server did not come up; no browser was opened.[/yellow]")
+
+        opener = launcher.open_when_ready(url, bind, port, browser, stop=stop, on_done=report)
+    try:
+        _run_server(db, pricing_path, subscriptions, sources, bind, port)
+    finally:
+        stop.set()
+        if opener is not None:
+            opener.join(timeout=2)
 
 
 # --------------------------------------------------------------------------- sync-all
