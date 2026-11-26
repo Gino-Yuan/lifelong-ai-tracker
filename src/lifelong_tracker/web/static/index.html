@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Lifelong AI Tracker</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="3" y="13" width="4" height="8" rx="1.5"></rect>
+        <rect x="10" y="8" width="4" height="13" rx="1.5"></rect>
+        <rect x="17" y="3" width="4" height="18" rx="1.5"></rect>
+      </svg>
+      <div>
+        <h1>Lifelong AI Tracker</h1>
+        <p class="brand-sub">Local token ledger · offline</p>
+      </div>
+    </div>
+    <div class="controls">
+      <div class="segmented" role="group" aria-label="Tool" id="tool-control">
+        <button type="button" data-tool="" aria-pressed="true">All Tools</button>
+      </div>
+      <div class="segmented" role="group" aria-label="Time range" id="range-control">
+        <button type="button" data-range="today">Today</button>
+        <button type="button" data-range="7d">7D</button>
+        <button type="button" data-range="30d">30D</button>
+        <button type="button" data-range="90d">90D</button>
+        <button type="button" data-range="ytd">YTD</button>
+        <button type="button" data-range="last_year" title="The whole previous calendar year">Last Year</button>
+        <button type="button" data-range="lifelong">Lifelong</button>
+        <button type="button" data-range="custom" title="Pick your own start and end dates (8)">Custom</button>
+      </div>
+      <form class="custom-range" id="custom-range" aria-label="Custom date range" novalidate hidden>
+        <label class="custom-field"><span>Start</span><input type="date" id="custom-start" required></label>
+        <label class="custom-field"><span>End</span><input type="date" id="custom-end" required></label>
+        <button type="submit" class="btn btn-xs btn-primary" id="custom-apply">Apply</button>
+        <span class="custom-error" id="custom-error" role="alert" hidden></span>
+      </form>
+      <div class="exports">
+        <button type="button" class="btn" id="sync-now"
+                title="Incrementally import new usage from every source in sources.json (S)">Sync Now</button>
+        <button type="button" class="btn" id="open-pricing" aria-haspopup="dialog"
+                title="Model price list (USD per 1M tokens)">Pricing</button>
+        <a class="btn" id="export-csv" href="/api/export?format=csv" download>Export CSV</a>
+        <a class="btn" id="export-json" href="/api/export?format=json" download>Export JSON</a>
+        <a class="btn btn-primary" id="export-card" href="/api/card?range=lifelong&amp;download=1" download
+           title="Shareable report card: totals, token mix and top models. No paths or project names.">Export Card (SVG)</a>
+      </div>
+    </div>
+  </header>
+
+  <div class="alert" id="alert" role="status" hidden>
+    <span class="alert-icon" aria-hidden="true">!</span>
+    <div class="alert-body">
+      <strong class="alert-title" id="alert-title">Pricing needs attention</strong>
+      <ul id="alert-list"></ul>
+      <div class="alert-actions" id="alert-actions" hidden></div>
+    </div>
+  </div>
+
+  <div class="filterbar" id="filterbar" hidden>
+    <span class="chip" id="model-chip">
+      <span class="chip-label">Model:</span>
+      <code class="chip-value" id="model-chip-value"></code>
+      <button type="button" class="chip-close" id="model-chip-clear" aria-label="Clear model filter" title="Show all models">×</button>
+    </span>
+  </div>
+
+  <main class="layout">
+    <section class="kpis" aria-label="Key metrics">
+      <article class="kpi">
+        <h2 class="kpi-label">Total Cost</h2>
+        <p class="kpi-value" id="kpi-cost">–</p>
+        <p class="kpi-sub" id="kpi-cost-sub">&nbsp;</p>
+        <p class="kpi-delta" id="kpi-cost-delta" hidden></p>
+      </article>
+      <article class="kpi">
+        <h2 class="kpi-label">Total Tokens</h2>
+        <p class="kpi-value" id="kpi-tokens">–</p>
+        <p class="kpi-sub" id="kpi-tokens-sub">&nbsp;</p>
+        <p class="kpi-delta" id="kpi-tokens-delta" hidden></p>
+      </article>
+      <article class="kpi">
+        <h2 class="kpi-label">Cache Hit %</h2>
+        <p class="kpi-value" id="kpi-hit">–</p>
+        <p class="kpi-sub" id="kpi-hit-sub">Cache read ÷ (input + cache read + cache write)</p>
+      </article>
+      <article class="kpi">
+        <h2 class="kpi-label">Cache Saved</h2>
+        <p class="kpi-value" id="kpi-saved">–</p>
+        <p class="kpi-sub" id="kpi-saved-sub">Cache reads priced at input − cache-read rate</p>
+      </article>
+      <article class="kpi kpi-plan" id="kpi-roi-card" hidden>
+        <h2 class="kpi-label">Plan Spent &amp; ROI</h2>
+        <p class="kpi-value kpi-plan-spent"><span id="kpi-roi-spent">–</span> <span class="kpi-plan-unit" id="kpi-roi-unit">spent</span></p>
+        <p class="kpi-plan-multiple" id="kpi-roi">–</p>
+        <p class="kpi-sub kpi-plan-sub" id="kpi-roi-sub">&nbsp;</p>
+      </article>
+      <article class="kpi">
+        <h2 class="kpi-label">Avg $ / 1M Tokens</h2>
+        <p class="kpi-value" id="kpi-avg">–</p>
+        <p class="kpi-sub" id="kpi-avg-sub">Blended over priced tokens</p>
+      </article>
+      <article class="kpi">
+        <h2 class="kpi-label">Active Streak</h2>
+        <p class="kpi-value" id="kpi-streak">–</p>
+        <p class="kpi-sub" id="kpi-streak-sub">&nbsp;</p>
+      </article>
+    </section>
+
+    <section class="records span-12" aria-labelledby="records-title">
+      <h2 class="records-title" id="records-title">Personal Records</h2>
+      <div class="records-row">
+        <article class="record">
+          <h3 class="record-label">Peak Day</h3>
+          <p class="record-value" id="rec-peak">–</p>
+          <p class="record-sub" id="rec-peak-sub">&nbsp;</p>
+        </article>
+        <article class="record">
+          <h3 class="record-label">Heaviest Session</h3>
+          <p class="record-value" id="rec-session">–</p>
+          <p class="record-sub" id="rec-session-sub">&nbsp;</p>
+        </article>
+        <article class="record">
+          <h3 class="record-label">Longest Streak</h3>
+          <p class="record-value" id="rec-streak">–</p>
+          <p class="record-sub" id="rec-streak-sub">&nbsp;</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="card span-12" aria-labelledby="mix-title">
+      <div class="card-head">
+        <h2 id="mix-title">Token Breakdown</h2>
+        <span class="card-meta" id="mix-meta"></span>
+      </div>
+      <div class="stackbar" id="mix-bar" role="img" aria-label="Token category shares"></div>
+      <div class="mix-legend" id="mix-legend"></div>
+    </section>
+
+    <section class="card span-12" aria-labelledby="trend-title">
+      <div class="card-head">
+        <div class="title-stack">
+          <h2 id="trend-title">Daily Trend</h2>
+          <span class="card-meta" id="trend-meta"></span>
+        </div>
+        <div class="card-tools wrap">
+          <div class="segmented small" role="group" aria-label="Trend metric" id="trend-toggle">
+            <button type="button" data-metric="tokens" aria-pressed="true">Tokens</button>
+            <button type="button" data-metric="cost" aria-pressed="false">Cost</button>
+          </div>
+          <div class="segmented small" role="group" aria-label="Trend granularity" id="gran-toggle">
+            <button type="button" data-gran="auto" aria-pressed="true" title="Daily up to 120 days, weekly up to 2 years, then monthly">Auto</button>
+            <button type="button" data-gran="day" aria-pressed="false">Daily</button>
+            <button type="button" data-gran="week" aria-pressed="false">Weekly</button>
+            <button type="button" data-gran="month" aria-pressed="false">Monthly</button>
+          </div>
+          <div class="segmented small" role="group" aria-label="Trend view" id="view-toggle">
+            <button type="button" data-view="combined" aria-pressed="true">Combined</button>
+            <button type="button" data-view="agent" aria-pressed="false">By Agent</button>
+          </div>
+        </div>
+      </div>
+      <div class="legend" id="trend-legend" hidden></div>
+      <div class="chart" id="trend-chart"></div>
+    </section>
+
+    <section class="card span-7" aria-labelledby="rank-title">
+      <div class="card-head">
+        <h2 id="rank-title">Breakdown</h2>
+        <div class="card-tools wrap">
+          <label class="switch" id="group-switch"
+                 title="Merge -low / -high / -xhigh tiers and date-stamped releases into one row">
+            <input type="checkbox" id="group-variants" role="switch">
+            <span class="switch-track" aria-hidden="true"></span>
+            <span>Group variants</span>
+          </label>
+          <div class="segmented small" role="tablist" aria-label="Breakdown dimension" id="rank-tabs">
+            <button type="button" role="tab" data-by="model" aria-selected="true">Model</button>
+            <button type="button" role="tab" data-by="tool" aria-selected="false">Tool</button>
+            <button type="button" role="tab" data-by="project" aria-selected="false">Project</button>
+          </div>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="rank" id="rank-table">
+          <thead>
+            <tr>
+              <th scope="col" id="rank-key-head">Model</th>
+              <th scope="col" class="col-share">Share of tokens</th>
+              <th scope="col" class="num">Tokens</th>
+              <th scope="col" class="num">Cost</th>
+              <th scope="col" class="num">Hit %</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="card-foot" id="rank-foot"></p>
+    </section>
+
+    <section class="card span-5" aria-labelledby="hour-title">
+      <div class="card-head">
+        <h2 id="hour-title">24-Hour Activity</h2>
+        <span class="card-meta" id="hour-meta"></span>
+      </div>
+      <div class="chart" id="hour-chart"></div>
+    </section>
+
+    <section class="card span-12" aria-labelledby="heat-title">
+      <div class="card-head">
+        <h2 id="heat-title">Activity Heatmap</h2>
+        <div class="card-tools">
+          <span class="card-meta" id="heat-meta"></span>
+          <label class="select">
+            <span class="visually-hidden">Year</span>
+            <select id="heat-year" aria-label="Year"></select>
+          </label>
+        </div>
+      </div>
+      <div class="heat-scroll"><div id="heat-chart"></div></div>
+      <div class="heat-legend" id="heat-legend"></div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span>Served from 127.0.0.1 · no external requests · writes only on Sync Now and price / plan edits</span>
+    <span class="keys" id="foot-keys">Keys: <kbd>1</kbd>-<kbd>8</kbd> range · <kbd>P</kbd> pricing · <kbd>S</kbd> sync · <kbd>Esc</kbd> clear</span>
+    <span id="foot-generated"></span>
+  </footer>
+
+  <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+  <div class="toast" id="toast" role="status" hidden></div>
+
+  <dialog class="modal modal-wide" id="pricing-dialog" aria-labelledby="pricing-title">
+    <div class="modal-body">
+      <div class="modal-head">
+        <div>
+          <h2 id="pricing-title">Model Pricing</h2>
+          <p class="modal-sub"><span id="pricing-unit">USD per 1M tokens</span> · Updated
+            <span id="pricing-updated">—</span> · <span id="pricing-count">0 models</span></p>
+        </div>
+        <button type="button" class="icon-btn" id="pricing-close" aria-label="Close">×</button>
+      </div>
+      <div class="segmented small pricing-tabs" role="tablist" aria-label="Pricing section" id="pricing-tabs">
+        <button type="button" role="tab" data-tab="models" aria-selected="true">Models</button>
+        <button type="button" role="tab" data-tab="subs" aria-selected="false">Subscriptions</button>
+      </div>
+      <div class="pane" id="pricing-models-pane">
+      <div class="pricing-toolbar">
+        <div class="segmented small" role="group" aria-label="Provider" id="pricing-provider">
+          <button type="button" data-provider="" aria-pressed="true">All</button>
+          <button type="button" data-provider="Claude" aria-pressed="false">Claude</button>
+          <button type="button" data-provider="Gemini" aria-pressed="false">Gemini</button>
+          <button type="button" data-provider="GPT" aria-pressed="false">GPT</button>
+          <button type="button" data-provider="Other" aria-pressed="false" hidden>Other</button>
+        </div>
+        <input type="search" id="pricing-search" class="search" placeholder="Search models"
+               aria-label="Search models" autocomplete="off" spellcheck="false">
+        <button type="button" class="btn btn-primary" id="pricing-add">+ Add Model</button>
+      </div>
+      <div class="pricing-scroll">
+        <table class="pricing-table">
+          <thead>
+            <tr>
+              <th scope="col">Model</th>
+              <th scope="col" class="num">Input</th>
+              <th scope="col" class="num">Output</th>
+              <th scope="col" class="num">Thinking</th>
+              <th scope="col" class="num">Cache Read</th>
+              <th scope="col" class="num">Cache Write</th>
+              <th scope="col" class="act">Action</th>
+            </tr>
+          </thead>
+          <tbody id="pricing-body"></tbody>
+        </table>
+        <p class="pricing-empty" id="pricing-empty" hidden></p>
+      </div>
+      <p class="modal-foot">Edit writes pricing.json and reprices every past request.
+        Variants such as -high / -low use their base model&#39;s row unless they have their own.</p>
+      </div>
+      <div class="pane" id="pricing-subs-pane" hidden>
+        <form id="subs-form" novalidate>
+          <p class="modal-sub subs-intro">Plan periods per tool, in USD per month. Saved to subscriptions.json.
+            Leave <strong>End</strong> empty for a plan that is still running. With any fee above 0 the dashboard
+            shows <strong>Subscription ROI</strong>: the API-equivalent value of the days a plan covers divided by
+            its cost for those days (days / 30.44 &times; monthly fee). Days after a plan ends cost nothing.</p>
+          <div class="subs-list" id="subs-list"></div>
+          <p class="modal-error" id="subs-error" role="alert" hidden></p>
+          <div class="modal-actions">
+            <button type="submit" class="btn btn-primary" id="subs-save">Save Subscriptions</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog class="modal" id="price-dialog" aria-labelledby="price-title">
+    <form id="price-form" novalidate>
+      <h2 id="price-title">Set Price</h2>
+      <p class="modal-sub" id="price-sub">USD per 1M tokens. Saved to pricing.json, then every past request is repriced.</p>
+      <div class="modal-model">
+        <span class="lbl">Model</span>
+        <code id="price-model"></code>
+        <input type="text" id="price-model-input" class="model-input" maxlength="128"
+               placeholder="e.g. gpt-6-luna" autocomplete="off" spellcheck="false"
+               aria-label="Model name" hidden>
+      </div>
+      <div class="check-row" id="price-base-row">
+        <label class="check">
+          <input type="checkbox" id="price-base" checked>
+          <span>Apply to base model <code id="price-base-name"></code></span>
+        </label>
+        <p class="hint">One price for every -low / -medium / -high / -xhigh variant.</p>
+      </div>
+      <div class="price-grid">
+        <label class="field"><span>Input</span>
+          <input type="number" id="price-input" min="0" step="any" inputmode="decimal" required></label>
+        <label class="field"><span>Output</span>
+          <input type="number" id="price-output" min="0" step="any" inputmode="decimal" required></label>
+        <label class="field"><span>Thinking <em>optional</em></span>
+          <input type="number" id="price-thinking" min="0" step="any" inputmode="decimal" placeholder="= Output"></label>
+        <label class="field"><span>Cache Read</span>
+          <input type="number" id="price-cache_read" min="0" step="any" inputmode="decimal" required></label>
+        <label class="field"><span>Cache Write</span>
+          <input type="number" id="price-cache_write" min="0" step="any" inputmode="decimal" required></label>
+      </div>
+      <p class="modal-error" id="price-error" role="alert" hidden></p>
+      <div class="modal-actions">
+        <button type="button" class="btn" id="price-cancel">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="price-save">Save &amp; Reprice</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

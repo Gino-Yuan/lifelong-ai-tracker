@@ -1,0 +1,16 @@
+{
+  "_comment": "Subscription plans per tool, in USD per month. Copy to subscriptions.json (git-ignored) or edit in the dashboard: Pricing > Subscriptions. Each tool has a list of non-overlapping periods: start is YYYY-MM-DD, end is YYYY-MM-DD (inclusive) or null for a plan that is still running. Cost per period = overlap days / 30.436875 x monthly_usd; days after a plan ends cost nothing. A plain number (\"opencode\": 0.0) is an undated plan that counts every day, the old format. Keys: claude-code, antigravity, opencode, codex, t3.",
+  "subscriptions": {
+    "claude-code": [
+      {"start": "2026-03-15", "end": "2026-07-31", "monthly_usd": 20.0},
+      {"start": "2026-08-01", "end": null, "monthly_usd": 100.0}
+    ],
+    "antigravity": [
+      {"start": "2026-05-01", "end": null, "monthly_usd": 20.0}
+    ],
+    "codex": [
+      {"start": "2026-08-01", "end": "2026-11-10", "monthly_usd": 20.0}
+    ],
+    "opencode": 0.0
+  }
+}

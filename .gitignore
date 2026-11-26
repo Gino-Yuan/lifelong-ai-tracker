@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Virtual env & local temp
+.venv/
+.tmp/
+
+# Local ledger database (never commit real usage data)
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Phase 3: personal config, logs, backups, generated job file and report cards
+sources.json
+subscriptions.json
+logs/
+backups/
+deploy/*.plist
+/report*.svg
+.claude/settings.local.json
+.DS_Store

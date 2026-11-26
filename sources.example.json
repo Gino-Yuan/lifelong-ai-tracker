@@ -1,0 +1,10 @@
+{
+  "_comment": "Copy to sources.json (git-ignored) and edit. '~' is expanded; relative paths resolve against this file's folder. enabled=false skips a source. tool: claude-code / antigravity (log folders), opencode / codex (the SQLite file or the folder that directly holds it; opened read-only) are ready; t3 is a placeholder until redacted samples exist.",
+  "sources": [
+    { "name": "claude-code", "tool": "claude-code", "path": "~/.claude/projects", "enabled": true },
+    { "name": "antigravity", "tool": "antigravity", "path": "~/.gemini/antigravity/brain", "enabled": true },
+    { "name": "opencode", "tool": "opencode", "path": "~/.local/share/opencode/opencode.db", "enabled": false },
+    { "name": "codex", "tool": "codex", "path": "~/.codex/state_5.sqlite", "enabled": false },
+    { "name": "t3", "tool": "t3", "path": "~/.t3", "enabled": false }
+  ]
+}
