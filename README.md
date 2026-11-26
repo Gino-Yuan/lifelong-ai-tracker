@@ -1,14 +1,119 @@
 # Lifelong AI Tracker
 
-A local, offline ledger of AI coding-tool token usage. It is built on Python 3.11+ and SQLite. **Phase 1**: the storage layer, `pricing.json`, `ClaudeCodeCollector`, analytics, and the CLI. **Phase 2**: a read-only local web dashboard and CSV / JSON export. **Phase 3**: multi-source `sync-all`, a nightly job generator (launchd on macOS, systemd / cron on Linux, Task Scheduler on Windows), online backups, and a shareable SVG report card.
+A local, offline ledger of AI coding-tool token usage: Claude Code, Antigravity, Codex and OpenCode. It runs on Python 3.11+ and SQLite on macOS, Linux and Windows. It comes with:
 
-- It reads only the directory you pass to `--source` (for OpenCode and Codex, the SQLite file or the folder that holds it). There is no default scan location.
-- It stores metadata only: timestamp, tool, model, project basename, session/request/message IDs, and the five token counts. Conversation text is never stored.
-- It makes no network calls. The ledger is written to `./data/tracker.db`, which is git-ignored.
+- a dashboard on your own machine;
+- CSV / JSON export;
+- nightly archiving and backups;
+- a shareable SVG report card.
+
+Three guarantees:
+
+- **Reads only what you name.** It reads only the paths you configure (`sources.json` or `--source`). There is no hidden default scan location.
+- **Metadata only.** It stores the timestamp, tool, model, project basename, session / request / message ids, and the five token counts. Conversation text is never stored.
+- **No network.** It makes no network calls, and the dashboard binds loopback addresses only. The ledger is written to `./data/tracker.db`, which is git-ignored.
+
+## Quick Start
+
+```bash
+git clone <this-repo-url> lifelong-ai-tracker
+cd lifelong-ai-tracker
+python3 -m venv .venv
+.venv/bin/pip install -e .
+.venv/bin/tracker init
+.venv/bin/tracker open --app
+```
+
+On Windows, use `py -m venv .venv`, then `.venv\Scripts\pip install -e .`, `.venv\Scripts\tracker init` and `.venv\Scripts\tracker open --app`.
+
+1. **`tracker init`** asks, one tool at a time, whether you use it. Answer *n* for tools you don't have. For each *y*:
+   - press Enter to accept the usual log location (see the table below) or type your own;
+   - choose `subscription` (a flat plan) or `api` (a pay-as-you-go API key).
+
+   The answers are written to `sources.json`. It never overwrites an existing file unless you pass `--force`. It does not check whether the paths exist; the first sync reports any that are missing.
+2. **`tracker open --app`** does four things:
+   - syncs every enabled source (incrementally, so later runs take a moment);
+   - starts the dashboard on `http://127.0.0.1:8765`;
+   - opens it once the server is ready (see [Desktop App Mode](#desktop-app-mode));
+   - stops on Ctrl+C.
+
+   Other options: `--no-sync` skips the sync, `--no-browser` only starts the server, and `--port` picks another port.
+
+You can also install with `pip install .` (not editable). The tracker then keeps `data/`, `sources.json` and `pricing.json` in the folder you run it from. Until you save your first price edit, it uses the price table bundled with the package.
+
+To keep the ledger growing while you're away, see [`schedule render`](#phase-3-scheduled-archiving-backups-report-card). It generates a nightly job, which you install yourself.
+
+## Default log locations
+
+These are the paths `tracker init` suggests. The tracker never looks at them on its own: only paths you confirm end up in `sources.json`. If a tool keeps its data somewhere else on your machine, enter that path instead.
+
+| Tool | `tool` id | macOS | Linux | Windows | Source type |
+|---|---|---|---|---|---|
+| Claude Code | `claude-code` | `~/.claude/projects` | `~/.claude/projects` | `%USERPROFILE%\.claude\projects` | folder of session JSONL files |
+| Antigravity | `antigravity` | `~/.gemini/antigravity/brain` | `~/.gemini/antigravity/brain` | `%USERPROFILE%\.gemini\antigravity\brain` | folder of conversations |
+| Codex | `codex` | `~/.codex/state_5.sqlite` | `~/.codex/state_5.sqlite` | `%USERPROFILE%\.codex\state_5.sqlite` | SQLite file (or its folder) |
+| OpenCode | `opencode` | `~/.local/share/opencode/opencode.db` | `~/.local/share/opencode/opencode.db` | `%LOCALAPPDATA%\opencode\opencode.db` | SQLite file (or its folder) |
+
+`sources.json` expands `~` but not `%VARS%`, so `tracker init` stores the Windows paths in `~` form, such as `~/AppData/Local/opencode/opencode.db`. Relative paths are resolved against the folder `sources.json` is in. The SQLite sources are always opened read-only.
+
+## Desktop App Mode
+
+**`tracker open --app`** shows the dashboard in its own window, with no tabs or address bar, so it behaves like a desktop app.
+
+- **Which browser:** it looks for an installed Chromium-family browser in this order: Chrome → Edge → Brave → Arc → Chromium. It starts the first one it finds with `--app=http://127.0.0.1:8765`.
+- **Where it looks:**
+  - macOS: `/Applications` and `~/Applications`;
+  - Windows: the usual Program Files / `AppData\Local` install folders, then `PATH`;
+  - Linux: `PATH`.
+- **Fallback:** if no such browser is found or it fails to start, the dashboard opens in your default browser instead. Without `--app` it always uses the default browser.
+- **Stopping:** the window is only a view, and the server keeps running in the terminal. Closing the window does not stop it. Press Ctrl+C in the terminal to stop it.
+
+**A Dock icon on macOS (Safari 17+, macOS Sonoma or later):**
+
+1. Start the server: `.venv/bin/tracker open --no-browser`. Use the same `--port` every time, because the Dock app remembers the full URL.
+2. Open `http://127.0.0.1:8765` in Safari.
+3. Choose **File → Add to Dock…** and confirm the name.
+
+The dashboard now has its own Dock icon and window. The icon opens the page; it does not start the server. So run `tracker open --no-browser` (or `tracker serve`) first; if the server isn't running, the window shows a connection error.
+
+Chrome and Edge offer the same thing from their menu (install the page as an app). That works on every OS.
+
+## Known Limitations & Non-Goals
+
+These limits are deliberate trade-offs, not bugs that are waiting to be fixed.
+
+1. **No official remaining quota and no burn rate.** The tracker cannot show:
+   - how much of a plan's quota you have left;
+   - rate-limit windows or the countdown to the next reset;
+   - how fast you are using up an allowance.
+
+   Vendors publish these only through their online services, which need your logged-in session. The tracker stays 100% offline and makes no outside network requests. It never reads OAuth tokens, API keys, keychains or other login credentials. What you see is the usage it recorded from local logs, priced at list prices. *Plan Spent & ROI* is computed from the plan periods you enter yourself.
+2. **Codex `state_5.sqlite` has no cache breakdown.** Codex stores only a running token total for each thread. It has no per-request rows and no input / output / reasoning / cache split. So for each thread:
+   - **One event:** the tracker records one event with the whole total as input tokens.
+   - **Cost:** it estimates the cost at a 90/8/2 blended rate (`0.90 × cache_read + 0.08 × input + 0.02 × output` per 1M tokens).
+   - **Cache Hit %:** these rows are left out of the global Cache Hit %. When only Codex is in scope, the card shows `—`.
+   - **Timing:** the whole thread is counted on the day and hour it started.
+
+   Treat Codex cost as an estimate. Its daily and hourly shape is coarse. See [Codex collector](#codex-collector).
+3. **Model prices are updated by hand.** `pricing.json` is a snapshot of public list prices, and its date is in `_meta.updated`. The tracker never downloads a newer one. When a vendor changes prices, you have three options:
+   - edit the model in the dashboard (**Pricing** → **Edit** or **+ Add Model**, then **Save & Reprice**);
+   - edit `pricing.json` and run `tracker reprice`;
+   - add a dated segment with `effective_from` (see [Dated prices](#key-semantics)), so usage before the change keeps the old rate.
+
+   Repricing rewrites only `cost_usd`; raw token counts are never touched. Earlier versions shipped a guessed price for the model name `unknown`, which is used when a tool logs no model name. That entry is gone. If your ledger has `unknown` rows, they now show under *Unpriced*. Click **Set Price** on them if you want an estimate.
+
+**Non-goals:**
+
+- **Not a live monitor.** Data appears when you sync: `tracker open`, **Sync Now**, or the nightly job.
+- **Not your invoice.** Costs are list-price estimates. Discounts, credits, taxes and batch pricing are not modelled.
+- **No cloud sync and no account.** Every ledger is local. Merging several machines is not supported.
+- **Only tools that keep local logs.** Chat in a web browser, or a tool that keeps usage only on a server, cannot be tracked.
 
 ## Layout
 
 ```
+LICENSE                          MIT
+CONTRIBUTING.md                  ground rules + how to add a collector for another agent
 pricing.json                     per-model USD / 1M tokens (editable; `tracker reprice` applies it)
 sources.example.json             template for sources.json (git-ignored) used by `sync-all` and Sync Now
 subscriptions.example.json       template for subscriptions.json (git-ignored): dated plan periods per tool
@@ -16,7 +121,11 @@ pyproject.toml                   deps: typer, rich (+ pytest for dev); console s
 data/tracker.db                  the ledger (created on first sync, git-ignored)
 backups/ logs/ deploy/           backups, scheduler log, generated job files (all git-ignored)
 src/lifelong_tracker/
-  config.py                      workspace-anchored default paths
+  config.py                      default paths (project root in a source checkout, else the current folder)
+  default_pricing.json           bundled copy of pricing.json (fallback for a non-editable install)
+  fsutil.py                      63-bit inode, atomic UTF-8 writes, Windows-safe replace / chmod
+  setup_wizard.py                `tracker init`: per-OS default paths, sources.json builder (never touches tool paths)
+  launcher.py                    `tracker open`: Chromium-family app window detection, loopback-only opening
   models.py                      UsageEvent, FileState, UTC timestamp helpers
   pricing.py                     normalisation + longest-prefix price lookup + model_family()
   subscriptions.py               subscriptions.json periods: load / validate / atomic save + overlap-day ROI
@@ -35,7 +144,7 @@ src/lifelong_tracker/
   schedule.py                    launchd plist / systemd unit + timer / crontab line / PowerShell task scripts + install commands (text only)
   card.py                        pure-Python SVG report card (no paths / project names)
   analytics.py                   totals, ratios, ranges, breakdowns, 24h, streaks, unpriced, cache savings, records
-  cli.py                         `tracker sync | sync-all | stats | reprice | serve | card | backup | schedule render | collectors`
+  cli.py                         `tracker init | open | sync | sync-all | stats | reprice | serve | card | backup | schedule render | collectors`
   web/app.py                     FastAPI JSON API (read-only GETs + guarded POSTs: pricing, subscriptions, sync) + static files
   web/security.py                loopback-only bind check, Host-header guard, CSP headers
   web/static/                    index.html, app.css, app.js (vanilla JS + inline SVG)
@@ -48,7 +157,7 @@ tests/
   fixtures/js/stub_dom.js        shared JavaScriptCore stub DOM (fetch is routed to the scenario)
   fixtures/js/pricing_smoke.js   click-through of the Model Pricing modal
   fixtures/js/features_smoke.js  KPIs, records, group switch, shortcuts, Sync Now, Subscriptions tab
-  test_*.py                      1112 tests (77 Phase 1 + 68 web + 40 Phase 3 + 24 Antigravity + 221 filters / pricing + 61 trend + 56 OpenCode + 57 Codex + 43 pricing table + 114 enhancements + 93 subscription periods + 26 Codex thread totals / estimates + 164 custom ranges / period-over-period + 68 cross-platform schedules / API billing / dated prices)
+  test_*.py                      1222 tests (77 Phase 1 + 68 web + 40 Phase 3 + 24 Antigravity + 221 filters / pricing + 61 trend + 56 OpenCode + 57 Codex + 43 pricing table + 114 enhancements + 93 subscription periods + 26 Codex thread totals / estimates + 164 custom ranges / period-over-period + 68 cross-platform schedules / API billing / dated prices + 38 portability / packaging + 57 init / open + 15 docs / collector examples)
 ```
 
 ## Key semantics
@@ -84,6 +193,8 @@ Replays of the same message in a resumed session's file collapse into the existi
 ## Commands
 
 ```bash
+.venv/bin/tracker init [--out sources.json] [--force]
+.venv/bin/tracker open [--app] [--no-sync] [--no-browser] [--host 127.0.0.1] [--port 8765] [--sources sources.json] [--db PATH]
 .venv/bin/tracker sync --source <dir> [--tool claude-code] [--db PATH] [--pricing PATH]
 .venv/bin/tracker sync --tool opencode --source <opencode.db or its folder>
 .venv/bin/tracker sync --tool codex --source <state_5.sqlite or its folder>
@@ -277,3 +388,16 @@ A step that is written again merges into one row through the MAX-per-field UPSER
 | tokens | `input_tokens = tokens_used`; rows with `tokens_used` NULL or `<= 0` are skipped |
 
 **Incremental sync.** The same signature check and `ms:<n>` high-water mark as OpenCode, using `COALESCE(updated_at_ms, created_at_ms, created_at * 1000)`. When a thread grows, its row is re-read and the MAX-per-field UPSERT (`ON CONFLICT DO UPDATE`) replaces the stored total. A total never shrinks.
+
+## Contributing
+
+Collectors for more agents (Cursor, Cline, Gemini CLI, ...) and fixes are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers:
+
+- the privacy rules;
+- the base classes;
+- a worked collector example;
+- the fabricated-fixture and canary tests every collector needs.
+
+## License
+
+[MIT](LICENSE)
