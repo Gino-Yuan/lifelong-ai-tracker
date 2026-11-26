@@ -276,7 +276,7 @@ def test_cli_card_accepts_last_year(ledger, tmp_path):
     out = tmp_path / "card.svg"
     r = CliRunner().invoke(cli.app, ["card", "--range", "last_year", "--db", str(ledger), "--out", str(out)])
     assert r.exit_code == 0, r.output
-    assert f"{date.today().year - 1} AI Usage" in out.read_text()
+    assert f"{date.today().year - 1} AI Usage" in out.read_text(encoding="utf-8")
 
 
 def test_analytics_last_year_bounds():
@@ -304,11 +304,11 @@ def test_analytics_trend_rejects_bad_split(ledger):
 # ---------------------------------------------------------------- frontend wiring
 
 def test_trend_controls_in_markup():
-    html = (STATIC_DIR / "index.html").read_text()
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     for needle in ('id="gran-toggle"', ">Daily<", ">Weekly<", ">Monthly<", 'id="view-toggle"',
                    ">Combined<", ">By Agent<", 'data-range="last_year"', ">Last Year<", 'id="trend-legend"'):
         assert needle in html, needle
-    js = (STATIC_DIR / "app.js").read_text()
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     for needle in ("granularity: state.gran", 'split_by: splitByAgent() ? "tool" : "none"',
                    'p.set("gran", state.gran)', 'p.set("view", state.view)', '"trend-line"',
                    "linearGradient", '"last_year"', "Available when All Tools is selected"):
@@ -320,5 +320,5 @@ def test_trend_controls_in_markup():
 def test_app_js_parses_with_javascriptcore():
     script = 'try { new Function(readFile(arguments[0])); print("SYNTAX_OK"); } catch (e) { print("SYNTAX_ERROR: " + e); }'
     out = subprocess.run([str(JSC), "-e", script, "--", str(STATIC_DIR / "app.js")],
-                         capture_output=True, text=True, timeout=30)
+                         capture_output=True, text=True, timeout=30, encoding="utf-8")
     assert out.stdout.strip() == "SYNTAX_OK", out.stdout + out.stderr

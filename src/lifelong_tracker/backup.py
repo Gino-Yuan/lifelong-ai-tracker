@@ -9,12 +9,13 @@ pattern in the backup folder, never anything else.
 
 from __future__ import annotations
 
-import os
 import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+
+from lifelong_tracker import fsutil
 
 BACKUP_RE = re.compile(r"^tracker-(\d{8})-(\d{6})(?:-(\d+))?\.db$")
 
@@ -106,7 +107,7 @@ def backup_database(
     if integrity != "ok":
         partial.unlink(missing_ok=True)
         raise sqlite3.DatabaseError(f"backup failed integrity_check: {integrity}")
-    os.replace(partial, target)
+    fsutil.replace(partial, target)  # retried on a transient Windows lock
 
     removed, kept = rotate_backups(out, keep)
     return BackupResult(

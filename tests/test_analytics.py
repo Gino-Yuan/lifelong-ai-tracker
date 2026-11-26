@@ -147,7 +147,8 @@ def test_reprice_changes_cost_only(synced, tmp_path):
     cheap = tmp_path / "p.json"
     cheap.write_text(
         '{"models": {"claude-sonnet-4-5": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},'
-        ' "fictional-model-x1": {"input": 1, "output": 2, "cache_read": 0, "cache_write": 0}}}'
+        ' "fictional-model-x1": {"input": 1, "output": 2, "cache_read": 0, "cache_write": 0}}}',
+        encoding="utf-8",
     )
     table = PricingTable.load(cheap)
     assert set(pricing_drift(synced, table)) >= {"claude-opus-4-5-20251101", "fictional-model-x1"}

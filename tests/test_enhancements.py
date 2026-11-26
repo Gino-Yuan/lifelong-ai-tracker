@@ -60,9 +60,9 @@ _ids = itertools.count(1)
 def pricing_path(tmp_path) -> Path:
     p = tmp_path / "prices" / "pricing.json"
     p.parent.mkdir()
-    raw = json.loads(TEST_PRICING.read_text())
+    raw = json.loads(TEST_PRICING.read_text(encoding="utf-8"))
     raw["models"].update(EXTRA_PRICES)
-    p.write_text(json.dumps(raw, indent=2))
+    p.write_text(json.dumps(raw, indent=2), encoding="utf-8")
     return p
 
 
@@ -119,7 +119,7 @@ def copy_sources(tmp_path: Path) -> tuple[Path, Path]:
 
 def write_sources(path: Path, entries) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"sources": entries}, indent=2))
+    path.write_text(json.dumps({"sources": entries}, indent=2), encoding="utf-8")
     return path
 
 
@@ -237,7 +237,7 @@ def test_load_missing_file_is_empty(tmp_path):
 
 def test_load_valid_file_skips_comments(tmp_path):
     p = tmp_path / "subscriptions.json"
-    p.write_text(json.dumps({"_comment": "USD per month", "claude-code": 20, "codex": 20.5, "opencode": 0}))
+    p.write_text(json.dumps({"_comment": "USD per month", "claude-code": 20, "codex": 20.5, "opencode": 0}), encoding="utf-8")
     assert fees_of(load_subscriptions(p)) == {"claude-code": 20.0, "codex": 20.5, "opencode": 0.0}
 
 
@@ -256,7 +256,7 @@ def test_load_valid_file_skips_comments(tmp_path):
 ])
 def test_load_rejects_invalid_files(tmp_path, text, needle):
     p = tmp_path / "subscriptions.json"
-    p.write_text(text)
+    p.write_text(text, encoding="utf-8")
     with pytest.raises(SubscriptionsError, match=needle):
         load_subscriptions(p)
 
@@ -272,10 +272,10 @@ def test_validate_fees_bounds():
 def test_save_is_ordered_keeps_comments_and_leaves_no_temp_files(tmp_path):
     p = tmp_path / "cfg" / "subscriptions.json"
     p.parent.mkdir()
-    p.write_text(json.dumps({"_comment": "keep me", "codex": 1}))
+    p.write_text(json.dumps({"_comment": "keep me", "codex": 1}), encoding="utf-8")
     stored = save_subscriptions(p, {"codex": 20, "claude-code": 20.0, "antigravity": 0})
     assert fees_of(stored) == {"claude-code": 20.0, "antigravity": 0.0, "codex": 20.0}
-    raw = json.loads(p.read_text())
+    raw = json.loads(p.read_text(encoding="utf-8"))
     assert list(raw) == ["_comment", "subscriptions"]
     assert list(raw["subscriptions"]) == ["claude-code", "antigravity", "codex"]
     assert raw["_comment"] == "keep me"
@@ -285,14 +285,14 @@ def test_save_is_ordered_keeps_comments_and_leaves_no_temp_files(tmp_path):
 
 def test_save_replaces_a_broken_file_and_rejects_bad_fees(tmp_path):
     p = tmp_path / "subscriptions.json"
-    p.write_text("{broken")
+    p.write_text("{broken", encoding="utf-8")
     assert fees_of(save_subscriptions(p, {"opencode": 5})) == {"opencode": 5.0}
-    before = p.read_text()
+    before = p.read_text(encoding="utf-8")
     with pytest.raises(SubscriptionsError):
         save_subscriptions(p, {"opencode": -5})
     with pytest.raises(SubscriptionsError):
         save_subscriptions(p, {"nope": 5})
-    assert p.read_text() == before  # a rejected save never touches the file
+    assert p.read_text(encoding="utf-8") == before  # a rejected save never touches the file
 
 
 # ------------------------------------------------------------------ ROI math
@@ -363,7 +363,7 @@ def _subs_file(tmp_path, data=None) -> Path:
     p = tmp_path / "cfg" / "subscriptions.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     if data is not None:
-        p.write_text(json.dumps(data) if not isinstance(data, str) else data)
+        p.write_text(json.dumps(data) if not isinstance(data, str) else data, encoding="utf-8")
     return p
 
 
@@ -401,7 +401,7 @@ def test_post_subscriptions_saves_and_drives_roi(db, pricing_path, tmp_path, roi
     r = c.post("/api/subscriptions", json={"fees": {"claude-code": 20, "antigravity": 0, "codex": 0}})
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "ok" and r.json()["configured"] is True
-    assert json.loads(subs.read_text()) == {"subscriptions": {"claude-code": 20.0, "antigravity": 0.0, "codex": 0.0}}
+    assert json.loads(subs.read_text(encoding="utf-8")) == {"subscriptions": {"claude-code": 20.0, "antigravity": 0.0, "codex": 0.0}}
     ov = c.get("/api/overview", params={"range": "30d"}).json()
     sub = ov["subscription"]
     assert sub["days"] == 30 and sub["monthly_usd"] == 20.0 and sub["basis"] == "tool"
@@ -437,10 +437,10 @@ def test_post_subscriptions_saves_and_drives_roi(db, pricing_path, tmp_path, roi
 ])
 def test_post_subscriptions_rejects_bad_payloads(db, pricing_path, tmp_path, payload):
     subs = _subs_file(tmp_path, {"codex": 7})
-    before = subs.read_text()
+    before = subs.read_text(encoding="utf-8")
     r = make_client(db, pricing_path, subs=subs).post("/api/subscriptions", json=payload)
     assert r.status_code == 422, r.text
-    assert subs.read_text() == before
+    assert subs.read_text(encoding="utf-8") == before
 
 
 @pytest.mark.parametrize("raw", ['{"fees": {"codex": NaN}}', '{"fees": {"codex": Infinity}}'])
@@ -473,13 +473,13 @@ CSRF_CASES = [
 @pytest.mark.parametrize("kw, status", CSRF_CASES)
 def test_post_subscriptions_csrf_guard(db, pricing_path, tmp_path, kw, status):
     subs = _subs_file(tmp_path, {"codex": 7})
-    before = subs.read_text()
+    before = subs.read_text(encoding="utf-8")
     kw = dict(kw)
     if "json" in kw:
         kw["json"] = {"fees": {"codex": 99}}
     r = make_client(db, pricing_path, subs=subs).post("/api/subscriptions", **kw)
     assert r.status_code == status, r.text
-    assert subs.read_text() == before
+    assert subs.read_text(encoding="utf-8") == before
 
 
 def test_post_subscriptions_rejects_foreign_host(db, pricing_path, tmp_path):
@@ -487,7 +487,7 @@ def test_post_subscriptions_rejects_foreign_host(db, pricing_path, tmp_path):
     r = make_client(db, pricing_path, subs=subs).post(
         "/api/subscriptions", json={"fees": {"codex": 1}}, headers={"Host": "evil.example.com"})
     assert r.status_code in (400, 403)
-    assert json.loads(subs.read_text()) == {"codex": 7}
+    assert json.loads(subs.read_text(encoding="utf-8")) == {"codex": 7}
 
 
 def test_subscriptions_same_origin_post_allowed(db, pricing_path, tmp_path):
@@ -495,7 +495,7 @@ def test_subscriptions_same_origin_post_allowed(db, pricing_path, tmp_path):
     r = make_client(db, pricing_path, subs=subs).post(
         "/api/subscriptions", json={"fees": {"codex": 1}},
         headers={"Origin": BASE, "Sec-Fetch-Site": "same-origin"})
-    assert r.status_code == 200 and json.loads(subs.read_text()) == {"subscriptions": {"codex": 1.0}}
+    assert r.status_code == 200 and json.loads(subs.read_text(encoding="utf-8")) == {"subscriptions": {"codex": 1.0}}
 
 
 # ================================================================== POST /api/sync
@@ -531,7 +531,7 @@ def test_sync_not_configured(db, pricing_path, tmp_path):
 def test_sync_invalid_config_is_422(db, pricing_path, tmp_path, text, needle):
     cfg = tmp_path / "cfg" / "sources.json"
     cfg.parent.mkdir()
-    cfg.write_text(text)
+    cfg.write_text(text, encoding="utf-8")
     r = make_client(db, pricing_path, sources=cfg).post("/api/sync", json={})
     assert r.status_code == 422
     assert needle in r.json()["detail"] and r.json()["detail"].startswith("sources.json is invalid")
@@ -877,7 +877,7 @@ def _text(html: str) -> str:
 
 
 def test_index_has_new_controls():
-    html = (STATIC_DIR / "index.html").read_text()
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     for needle in ['id="sync-now"', 'id="kpi-saved"', 'id="kpi-saved-sub"', 'id="kpi-roi-card" hidden',
                    'id="kpi-roi"', 'id="kpi-roi-spent"', 'id="kpi-roi-unit">spent<', 'Plan Spent &amp; ROI', 'id="rec-peak"', 'id="rec-session"', 'id="rec-streak"',
                    'id="group-variants" role="switch"', 'id="pricing-tabs"', 'data-tab="subs"',
@@ -892,7 +892,7 @@ def test_index_has_new_controls():
 
 
 def test_app_js_wiring():
-    js = (STATIC_DIR / "app.js").read_text()
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     for needle in ['group_variants: "true"', 'p.set("group", "0")', 'group: true,', 'p.get("group") !== "0"', '"/api/sync"', '"/api/subscriptions"',
                    'document.addEventListener("keydown", onShortcut)', '+ "×"', "} value`"]:
         assert needle in js, needle
@@ -916,7 +916,7 @@ def test_subscriptions_example_is_valid_and_ignored():
     assert [(p.start.isoformat(), p.end and p.end.isoformat(), p.monthly_usd) for p in plans["claude-code"]] == [
         ("2026-03-15", "2026-07-31", 20.0), ("2026-08-01", None, 100.0)]
     assert plans["opencode"][0].legacy and plans["opencode"][0].monthly_usd == 0.0
-    ignored = (PROJECT_ROOT / ".gitignore").read_text().splitlines()
+    ignored = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert "subscriptions.json" in ignored and "sources.json" in ignored
 
 
@@ -1043,7 +1043,7 @@ def recorded(tmp_path, sync_env) -> Path:
     R["overview_scoped"] = {
         f"{rng}|{tool or ''}": c.get("/api/overview", params={"range": rng, **({"tool": tool} if tool else {})}).json()
         for rng, tool in PLAN_SCOPES}
-    entries = json.loads(sync_env["sources"].read_text())["sources"]
+    entries = json.loads(sync_env["sources"].read_text(encoding="utf-8"))["sources"]
     write_sources(sync_env["sources"], entries + [
         {"name": "missing", "tool": "opencode", "path": str(tmp_path / "missing.db")}])
     R["sync_partial"] = c.post("/api/sync", json={}).json()
@@ -1105,14 +1105,14 @@ def recorded(tmp_path, sync_env) -> Path:
     assert {"claude-code", "antigravity"} <= tool_ids, tool_ids
     assert X["sync_partial_toast"].endswith(" · nothing new · failed: missing")
     out = tmp_path / "recorded.json"
-    out.write_text(json.dumps({"responses": R, "expect": X}))
+    out.write_text(json.dumps({"responses": R, "expect": X}), encoding="utf-8")
     return out
 
 
 def _run_jsc(scenario: Path, *args: Path) -> list[str]:
     out = subprocess.run([str(JSC), str(JS / "stub_dom.js"), str(scenario), "--",
                           str(STATIC_DIR / "app.js"), *map(str, args)],
-                         capture_output=True, text=True, timeout=60)
+                         capture_output=True, text=True, timeout=60, encoding="utf-8")
     lines = out.stdout.strip().splitlines()
     assert lines and lines[-1] == "SMOKE_OK", out.stdout + out.stderr
     assert not [ln for ln in lines if ln.startswith("FAIL")]
@@ -1123,10 +1123,10 @@ def _run_jsc(scenario: Path, *args: Path) -> list[str]:
 def test_app_js_syntax_jsc():
     script = 'try { new Function(readFile(arguments[0])); print("SYNTAX_OK"); } catch (e) { print("SYNTAX_ERROR " + e); }'
     for f in ("app.js",):
-        out = subprocess.run([str(JSC), "-e", script, "--", str(STATIC_DIR / f)], capture_output=True, text=True, timeout=60)
+        out = subprocess.run([str(JSC), "-e", script, "--", str(STATIC_DIR / f)], capture_output=True, text=True, timeout=60, encoding="utf-8")
         assert out.stdout.strip() == "SYNTAX_OK", out.stdout + out.stderr
     for f in ("stub_dom.js", "pricing_smoke.js", "features_smoke.js", "range_smoke.js", "billing_smoke.js"):
-        out = subprocess.run([str(JSC), "-e", script, "--", str(JS / f)], capture_output=True, text=True, timeout=60)
+        out = subprocess.run([str(JSC), "-e", script, "--", str(JS / f)], capture_output=True, text=True, timeout=60, encoding="utf-8")
         assert out.stdout.strip() == "SYNTAX_OK", f + out.stdout + out.stderr
 
 

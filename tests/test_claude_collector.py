@@ -101,10 +101,10 @@ def test_full_fixture_file_scan(collector):
 def test_discover_is_limited_to_source_and_skips_symlinks(collector, tmp_path):
     src = tmp_path / "src"
     (src / "p").mkdir(parents=True)
-    (src / "p" / "a.jsonl").write_text("")
-    (src / "p" / "notes.txt").write_text("")
+    (src / "p" / "a.jsonl").write_text("", encoding="utf-8")
+    (src / "p" / "notes.txt").write_text("", encoding="utf-8")
     outside = tmp_path / "outside.jsonl"
-    outside.write_text("")
+    outside.write_text("", encoding="utf-8")
     (src / "p" / "link.jsonl").symlink_to(outside)
     assert [p.name for p in collector.discover(src)] == ["a.jsonl"]
 

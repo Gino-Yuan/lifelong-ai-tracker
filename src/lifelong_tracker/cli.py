@@ -30,7 +30,10 @@ from lifelong_tracker.config import (
     DEFAULT_SOURCES_PATH,
     DEFAULT_SUBSCRIPTIONS_PATH,
     DEFAULT_TRACKER_BIN,
+    IS_WINDOWS,
     PROJECT_ROOT,
+    pricing_read_path,
+    pricing_seed,
 )
 from lifelong_tracker.pricing import PricingTable
 from lifelong_tracker.storage import connect, connect_readonly, pricing_drift, reprice
@@ -57,7 +60,8 @@ CARD_RANGE_ALIASES = {"all": "lifelong", "year": "ytd"}
 
 DbOpt = typer.Option(DEFAULT_DB_PATH, "--db", help="SQLite ledger path.", dir_okay=False)
 PricingOpt = typer.Option(
-    DEFAULT_PRICING_PATH, "--pricing", help="pricing.json path.", exists=True, dir_okay=False
+    DEFAULT_PRICING_PATH, "--pricing", dir_okay=False,
+    help="pricing.json path (default: the project's; the bundled table until one exists).",
 )
 
 
@@ -81,8 +85,9 @@ def _fmt_usd(x: float) -> str:
 
 
 def _load_pricing(path: Path) -> PricingTable:
+    """Load --pricing; the default location falls back to the bundled table until it exists."""
     try:
-        return PricingTable.load(path)
+        return PricingTable.load(pricing_read_path(path))
     except (OSError, ValueError) as exc:
         console.print(f"[red]Cannot load pricing file {path}: {exc}[/red]")
         raise typer.Exit(2) from exc
@@ -279,10 +284,10 @@ def stats(
 @app.command("reprice")
 def reprice_cmd(db: Path = DbOpt, pricing_path: Path = PricingOpt) -> None:
     """Recompute equivalent cost of every event from pricing.json (tokens untouched)."""
+    pricing = _load_pricing(pricing_path)
     if not Path(db).exists():
         console.print(f"[yellow]No ledger at {db}.[/yellow]")
         raise typer.Exit(1)
-    pricing = _load_pricing(pricing_path)
     with connect(db) as conn:
         res = reprice(conn, pricing)
         unpriced = analytics.unpriced_models(conn, pricing)
@@ -321,6 +326,7 @@ def serve(
             f"(127.0.0.1, ::1 or localhost).[/red]"
         )
         raise typer.Exit(2)
+    _load_pricing(pricing_path)  # fail fast on a missing or broken --pricing file
     if not Path(db).exists():
         console.print(f"[yellow]No ledger at {db} yet - the dashboard will be empty until you sync.[/yellow]")
 
@@ -333,7 +339,7 @@ def serve(
     console.print(f"Dashboard: [bold cyan]http://{shown}:{port}[/bold cyan]  (Ctrl+C to stop)")
     uvicorn.run(
         create_app(Path(db), Path(pricing_path), subscriptions_path=Path(subscriptions),
-                   sources_path=Path(sources)),
+                   sources_path=Path(sources), pricing_seed=pricing_seed(Path(pricing_path))),
         host=bind,
         port=port,
         log_level="warning",
@@ -476,7 +482,7 @@ def card(
         svg = render_card(conn, range_name)
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(svg, encoding="utf-8")
+    out.write_text(svg, encoding="utf-8", newline="\n")  # LF on every OS
     console.print(f"Report card ({RANGES[range_name]}) written to [bold]{out.resolve()}[/bold]", soft_wrap=True)
 
 
@@ -531,8 +537,9 @@ def schedule_render(
         raise typer.Exit(2) from exc
 
     project_root = PROJECT_ROOT
-    if tracker_bin is None:
-        tracker_bin = (DEFAULT_TRACKER_BIN if target != "windows"
+    _load_pricing(pricing_path)  # the job must not point at a missing or broken price table
+    if tracker_bin is None:  # same OS family as here: the default; else that OS's .venv layout
+        tracker_bin = (DEFAULT_TRACKER_BIN if (target == "windows") == IS_WINDOWS
                        else sched.default_tracker_bin(project_root, target))
     if out is None:
         out = sched.default_out(DEFAULT_PLIST_PATH.parent, label, target)

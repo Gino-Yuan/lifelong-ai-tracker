@@ -35,9 +35,9 @@ def detect_platform(sys_platform: str | None = None) -> str:
 
 def default_tracker_bin(project_root: Path, platform: str) -> Path:
     """The project's virtualenv entry point on `platform`."""
-    if platform == "windows":
-        return project_root / ".venv" / "Scripts" / "tracker.exe"
-    return project_root / ".venv" / "bin" / "tracker"
+    from lifelong_tracker.config import venv_tracker_bin
+
+    return venv_tracker_bin(project_root, windows=platform == "windows")
 
 
 def default_out(deploy_dir: Path, label: str, platform: str) -> Path:

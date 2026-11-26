@@ -20,7 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from conftest import FIXTURES, TEST_PRICING
-from lifelong_tracker import pricing as pricing_mod
+from lifelong_tracker import fsutil as fsutil_mod
 from lifelong_tracker.collectors import AntigravityCollector, ClaudeCodeCollector
 from lifelong_tracker.pricing import (
     PricingTable,
@@ -288,7 +288,7 @@ def test_base_model_name():
 
 @pytest.fixture
 def gemini_table(tmp_path) -> PricingTable:
-    spec = json.loads(TEST_PRICING.read_text())
+    spec = json.loads(TEST_PRICING.read_text(encoding="utf-8"))
     spec["models"]["gemini-4-neon"] = {"input": 2, "output": 12, "cache_read": 0.2, "cache_write": 2.5}
     spec["models"]["gemini-4-pulse-high"] = {"input": 9, "output": 9, "cache_read": 9, "cache_write": 9}
     spec["models"]["gemini-4-pulse"] = {"input": 1, "output": 1, "cache_read": 1, "cache_write": 1}
@@ -329,11 +329,11 @@ def test_tier_stripping_does_not_cross_versions(gemini_table, model):
 # ---------------------------------------------------------------- set_model_price (atomic file write)
 
 def test_set_model_price_adds_entry_and_preserves_file(pricing_file):
-    before = json.loads(pricing_file.read_text())
+    before = json.loads(pricing_file.read_text(encoding="utf-8"))
     os.chmod(pricing_file, 0o640)
     upd = set_model_price(pricing_file, "gemini-4-neon", dict(GEMINI_PRICE))
     assert upd.key == "gemini-4-neon" and not upd.replaced
-    after = json.loads(pricing_file.read_text())
+    after = json.loads(pricing_file.read_text(encoding="utf-8"))
     assert after["_meta"] == before["_meta"]
     assert list(after["models"])[:-1] == list(before["models"])  # order kept, new entry appended
     for name, spec in before["models"].items():
@@ -343,14 +343,14 @@ def test_set_model_price_adds_entry_and_preserves_file(pricing_file):
     assert upd.table.lookup("gemini-4-neon-high")[0] == "gemini-4-neon"
     assert (pricing_file.stat().st_mode & 0o777) == 0o640
     assert sorted(p.name for p in pricing_file.parent.iterdir()) == ["pricing.json"]  # no temp files left
-    text = pricing_file.read_text()
+    text = pricing_file.read_text(encoding="utf-8")
     assert '    "gemini-4-neon":' in text and text.endswith("}\n")  # one line per model
 
 
 def test_set_model_price_replaces_and_normalises_name(pricing_file):
     upd = set_model_price(pricing_file, "Anthropic/Claude-Opus-4-5", {**GEMINI_PRICE, "thinking": 30})
     assert upd.key == "claude-opus-4-5" and upd.replaced
-    models = json.loads(pricing_file.read_text())["models"]
+    models = json.loads(pricing_file.read_text(encoding="utf-8"))["models"]
     assert models["claude-opus-4-5"]["thinking"] == 30.0
     assert list(models).count("claude-opus-4-5") == 1
 
@@ -361,7 +361,7 @@ def test_set_model_price_is_atomic_on_failure(pricing_file, monkeypatch):
     def boom(*_a, **_k):
         raise OSError("disk full")
 
-    monkeypatch.setattr(pricing_mod.os, "replace", boom)
+    monkeypatch.setattr(fsutil_mod.os, "replace", boom)
     with pytest.raises(OSError):
         set_model_price(pricing_file, "gemini-4-neon", dict(GEMINI_PRICE))
     assert pricing_file.read_bytes() == original
@@ -402,7 +402,7 @@ def test_post_pricing_base_model_writes_and_reprices(wclient, mixed_ledger, pric
     assert body["reprice"]["events_unpriced"] == 1 and body["reprice"]["events_priced"] == 8
 
     # pricing.json on disk
-    assert json.loads(pricing_file.read_text())["models"]["gemini-4-neon"] == GEMINI_PRICE
+    assert json.loads(pricing_file.read_text(encoding="utf-8"))["models"]["gemini-4-neon"] == GEMINI_PRICE
 
     # ledger: only cost_usd changed, and it is exactly right
     assert token_snapshot(mixed_ledger) == tokens_before
@@ -444,7 +444,7 @@ def test_post_pricing_without_ledger_does_not_create_db(db_path, pricing_file):
     r = c.post("/api/pricing", json={"model": "gemini-4-neon", **GEMINI_PRICE})
     assert r.status_code == 200 and r.json()["reprice"] is None
     assert not db_path.exists()
-    assert "gemini-4-neon" in json.loads(pricing_file.read_text())["models"]
+    assert "gemini-4-neon" in json.loads(pricing_file.read_text(encoding="utf-8"))["models"]
 
 
 @pytest.mark.parametrize("payload", [
@@ -529,11 +529,11 @@ def test_other_methods_on_pricing_are_not_allowed(wclient):
 # ---------------------------------------------------------------- frontend wiring
 
 def test_dashboard_has_filter_and_pricing_ui():
-    html = (STATIC_DIR / "index.html").read_text()
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     for needle in ('id="tool-control"', ">All Tools<", 'id="filterbar"', 'id="model-chip-clear"',
                    'id="price-dialog"', "Apply to base model", "Save &amp; Reprice", 'id="alert-actions"'):
         assert needle in html, needle
-    js = (STATIC_DIR / "app.js").read_text()
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     for needle in ('fetch("/api/pricing"', '"Content-Type": "application/json"', "api(\"/api/tools\")",
                    'p.set("tool", state.tool)', 'p.set("model", state.model)', "history.replaceState",
                    "openPriceDialog(", "Set Price", "e.preventDefault()"):

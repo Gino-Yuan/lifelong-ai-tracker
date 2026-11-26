@@ -151,10 +151,10 @@ def test_pricing_drift_banner_and_live_reload(ledger, tmp_path):
     c = make_client(ledger, pricing_path=pricing_copy)
     assert not c.get("/api/overview").json()["alerts"]["needs_reprice"]
 
-    spec = json.loads(pricing_copy.read_text())
+    spec = json.loads(pricing_copy.read_text(encoding="utf-8"))
     spec["models"]["claude-opus-4-5"]["output"] = 99.0
     spec["models"]["fictional-model-x1"] = {"input": 1, "output": 1, "cache_read": 0, "cache_write": 0}
-    pricing_copy.write_text(json.dumps(spec))
+    pricing_copy.write_text(json.dumps(spec), encoding="utf-8")
     import os
     st = pricing_copy.stat()
     os.utime(pricing_copy, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))  # make mtime change visible
@@ -166,7 +166,7 @@ def test_pricing_drift_banner_and_live_reload(ledger, tmp_path):
 
 def test_broken_pricing_file_is_a_clear_500(ledger, tmp_path):
     bad = tmp_path / "pricing.json"
-    bad.write_text("{not json")
+    bad.write_text("{not json", encoding="utf-8")
     r = make_client(ledger, pricing_path=bad).get("/api/overview")
     assert r.status_code == 500 and "pricing" in r.json()["detail"].lower()
 

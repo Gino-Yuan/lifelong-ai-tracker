@@ -15,7 +15,7 @@ import pytest
 from typer.testing import CliRunner
 
 from lifelong_tracker import analytics, cli
-from lifelong_tracker import pricing as pricing_mod
+from lifelong_tracker import fsutil as fsutil_mod
 from lifelong_tracker.storage import connect
 from lifelong_tracker.subscriptions import (
     DAYS_PER_MONTH,
@@ -106,7 +106,7 @@ def subs_file(tmp_path: Path, data=None) -> Path:
     p = tmp_path / "cfg" / "subscriptions.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     if data is not None:
-        p.write_text(data if isinstance(data, str) else json.dumps(data))
+        p.write_text(data if isinstance(data, str) else json.dumps(data), encoding="utf-8")
     return p
 
 
@@ -143,7 +143,7 @@ def test_save_writes_current_format_keeps_comments_and_round_trips(tmp_path):
     p = subs_file(tmp_path, {"_comment": "keep me", "codex": 1})
     stored = save_subscriptions(p, {"codex": SPEC["codex"], "claude-code": list(reversed(SPEC["claude-code"])),
                                     "opencode": 0})
-    raw = json.loads(p.read_text())
+    raw = json.loads(p.read_text(encoding="utf-8"))
     assert raw == {"_comment": "keep me", "subscriptions": {
         "claude-code": SPEC["claude-code"], "opencode": 0.0, "codex": SPEC["codex"]}}
     assert load_subscriptions(p) == stored
@@ -152,15 +152,15 @@ def test_save_writes_current_format_keeps_comments_and_round_trips(tmp_path):
 
 def test_failed_atomic_replace_leaves_the_file_and_no_temp(tmp_path, monkeypatch):
     p = subs_file(tmp_path, {"subscriptions": {"codex": 7}})
-    before = p.read_text()
+    before = p.read_text(encoding="utf-8")
 
     def boom(*_a, **_k):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(pricing_mod.os, "replace", boom)
+    monkeypatch.setattr(fsutil_mod.os, "replace", boom)
     with pytest.raises(OSError):
         save_subscriptions(p, SPEC)
-    assert p.read_text() == before
+    assert p.read_text(encoding="utf-8") == before
     assert sorted(x.name for x in p.parent.iterdir()) == ["subscriptions.json"]
 
 
@@ -373,7 +373,7 @@ def test_post_periods_writes_file_and_drives_overview(ledger, pricing_path, tmp_
         {"start": "2026-08-01", "monthly_usd": 100}, {"start": "2026-03-15", "end": "2026-07-31", "monthly_usd": 20}]}}
     r = c.post("/api/subscriptions", json=body)
     assert r.status_code == 200, r.text
-    assert json.loads(p.read_text()) == {"_comment": "mine", "subscriptions": SPEC}
+    assert json.loads(p.read_text(encoding="utf-8")) == {"_comment": "mine", "subscriptions": SPEC}
     assert r.json()["status"] == "ok" and [x["monthly_usd"] for x in r.json()["tools"]][:1] == [100.0]
 
     sub = c.get("/api/overview", params={"range": "30d"}).json()["subscription"]
@@ -392,9 +392,9 @@ def test_post_periods_writes_file_and_drives_overview(ledger, pricing_path, tmp_
 def test_post_legacy_fees_body_still_works(db, pricing_path, tmp_path):  # noqa: F811
     p = subs_file(tmp_path)
     r = make_client(db, pricing_path, subs=p).post("/api/subscriptions", json={"fees": {"codex": 20}})
-    assert r.status_code == 200 and json.loads(p.read_text()) == {"subscriptions": {"codex": 20.0}}
+    assert r.status_code == 200 and json.loads(p.read_text(encoding="utf-8")) == {"subscriptions": {"codex": 20.0}}
     r = make_client(db, pricing_path, subs=p).post("/api/subscriptions", json={"subscriptions": {"codex": 25}})
-    assert r.status_code == 200 and json.loads(p.read_text()) == {"subscriptions": {"codex": 25.0}}
+    assert r.status_code == 200 and json.loads(p.read_text(encoding="utf-8")) == {"subscriptions": {"codex": 25.0}}
 
 
 @pytest.mark.parametrize("payload", [
@@ -422,10 +422,10 @@ def test_post_legacy_fees_body_still_works(db, pricing_path, tmp_path):  # noqa:
 ])
 def test_post_rejects_bad_periods_and_leaves_the_file(db, pricing_path, tmp_path, payload):  # noqa: F811
     p = subs_file(tmp_path, {"subscriptions": {"codex": 7}})
-    before = p.read_text()
+    before = p.read_text(encoding="utf-8")
     r = make_client(db, pricing_path, subs=p).post("/api/subscriptions", json=payload)
     assert r.status_code == 422, r.text
-    assert p.read_text() == before
+    assert p.read_text(encoding="utf-8") == before
 
 
 def test_post_rejects_non_finite_fee_in_a_period(db, pricing_path, tmp_path):  # noqa: F811
@@ -438,45 +438,45 @@ def test_post_rejects_non_finite_fee_in_a_period(db, pricing_path, tmp_path):  #
 
 def test_post_over_4_kib_is_413(db, pricing_path, tmp_path):  # noqa: F811
     p = subs_file(tmp_path, {"subscriptions": {"codex": 7}})
-    before = p.read_text()
+    before = p.read_text(encoding="utf-8")
     periods = [{"start": f"20{y:02d}-01-01", "end": f"20{y:02d}-12-31", "monthly_usd": 12345.678901}
                for y in range(10, 99)]
     body = json.dumps({"subscriptions": {"claude-code": periods}})
     assert len(body) > 4096
     r = make_client(db, pricing_path, subs=p).post(
         "/api/subscriptions", content=body, headers={"Content-Type": "application/json"})
-    assert r.status_code == 413 and p.read_text() == before
+    assert r.status_code == 413 and p.read_text(encoding="utf-8") == before
 
 
 @pytest.mark.parametrize("kw, status", CSRF_CASES)
 def test_post_periods_csrf_guard(db, pricing_path, tmp_path, kw, status):  # noqa: F811
     p = subs_file(tmp_path, {"subscriptions": {"codex": 7}})
-    before = p.read_text()
+    before = p.read_text(encoding="utf-8")
     kw = dict(kw)
     if "json" in kw:
         kw["json"] = {"subscriptions": SPEC}
     r = make_client(db, pricing_path, subs=p).post("/api/subscriptions", **kw)
     assert r.status_code == status, r.text
-    assert p.read_text() == before
+    assert p.read_text(encoding="utf-8") == before
 
 
 def test_post_periods_rejects_foreign_host_and_allows_same_origin(db, pricing_path, tmp_path):  # noqa: F811
     p = subs_file(tmp_path, {"subscriptions": {"codex": 7}})
     c = make_client(db, pricing_path, subs=p)
     r = c.post("/api/subscriptions", json={"subscriptions": SPEC}, headers={"Host": "evil.example.com"})
-    assert r.status_code in (400, 403) and json.loads(p.read_text()) == {"subscriptions": {"codex": 7}}
+    assert r.status_code in (400, 403) and json.loads(p.read_text(encoding="utf-8")) == {"subscriptions": {"codex": 7}}
     r = c.post("/api/subscriptions", json={"subscriptions": SPEC},
                headers={"Origin": BASE, "Sec-Fetch-Site": "same-origin"})
-    assert r.status_code == 200 and json.loads(p.read_text()) == {"subscriptions": SPEC}
+    assert r.status_code == 200 and json.loads(p.read_text(encoding="utf-8")) == {"subscriptions": SPEC}
 
 
 def test_write_failure_is_500_and_keeps_the_file(db, pricing_path, tmp_path, monkeypatch):  # noqa: F811
     p = subs_file(tmp_path, {"subscriptions": {"codex": 7}})
-    before = p.read_text()
-    monkeypatch.setattr(pricing_mod.os, "replace", lambda *_a: (_ for _ in ()).throw(OSError(13, "Permission denied")))
+    before = p.read_text(encoding="utf-8")
+    monkeypatch.setattr(fsutil_mod.os, "replace", lambda *_a: (_ for _ in ()).throw(OSError(13, "Permission denied")))
     r = make_client(db, pricing_path, subs=p).post("/api/subscriptions", json={"subscriptions": SPEC})
     assert r.status_code == 500 and "Cannot write" in r.json()["detail"]
-    assert p.read_text() == before and sorted(x.name for x in p.parent.iterdir()) == ["subscriptions.json"]
+    assert p.read_text(encoding="utf-8") == before and sorted(x.name for x in p.parent.iterdir()) == ["subscriptions.json"]
 
 
 def test_invalid_file_on_disk_is_reported(db, pricing_path, tmp_path):  # noqa: F811
@@ -525,20 +525,20 @@ def test_cli_card_never_includes_subscription_data(ledger, tmp_path):
     out = tmp_path / "out" / "card.svg"
     res = CliRunner().invoke(cli.app, ["card", "--db", str(ledger), "--out", str(out)])
     assert res.exit_code == 0, res.output
-    _assert_no_secrets(out.read_text(), "tracker card")
+    _assert_no_secrets(out.read_text(encoding="utf-8"), "tracker card")
 
 
 def test_card_and_export_code_do_not_touch_subscriptions():
     src = Path(cli.__file__).parent
-    assert "subscri" not in (src / "card.py").read_text()
-    assert "subscri" not in (src / "analytics.py").read_text().lower()
+    assert "subscri" not in (src / "card.py").read_text(encoding="utf-8")
+    assert "subscri" not in (src / "analytics.py").read_text(encoding="utf-8").lower()
 
 
 # ================================================================== UI wiring
 
 def test_subscriptions_tab_markup_and_script():
-    html = (STATIC_DIR / "index.html").read_text()
-    js = (STATIC_DIR / "app.js").read_text()
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     assert 'id="subs-list"' in html and 'id="subs-grid"' not in html
     assert "still running" in html
     for needle in ['type: "date"', "JSON.stringify({ subscriptions: plan.subscriptions })", '"+ Add period"',

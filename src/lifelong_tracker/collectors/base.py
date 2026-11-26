@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
+from lifelong_tracker.fsutil import inode_replaced, stable_inode
 from lifelong_tracker.models import FileState, UsageEvent
 
 HEAD_FINGERPRINT_BYTES = 4096
@@ -67,6 +68,8 @@ class JsonlCollector(BaseCollector):
       trailing line is left for the next sync (offset is not advanced past it);
     * unchanged inode + size + mtime  -> fast skip, file not opened;
     * different inode                  -> file replaced   -> rescan from 0;
+      (inodes are masked to 63 bits; 0 = unknown, e.g. some Windows file
+      systems, and then only size / mtime / head hash decide);
     * size < stored offset             -> file truncated  -> rescan from 0;
     * first `head_len` bytes changed   -> rewritten in place -> rescan from 0.
     Rescans are safe because storage UPSERTs are idempotent.
@@ -98,13 +101,14 @@ class JsonlCollector(BaseCollector):
 
         if checkpoint is not None:
             prev_lines, prev_resets = checkpoint.lines_read, checkpoint.resets
+            inode = stable_inode(st)
             if (
-                st.st_ino == checkpoint.inode
+                not inode_replaced(checkpoint.inode, inode)
                 and st.st_size == checkpoint.size
                 and st.st_mtime_ns == checkpoint.mtime_ns
             ):
                 return FileScan(path=path, state=checkpoint, unchanged=True)
-            if st.st_ino != checkpoint.inode:
+            if inode_replaced(checkpoint.inode, inode):
                 reset = "replaced"
             elif st.st_size < checkpoint.offset:
                 reset = "truncated"
@@ -147,7 +151,7 @@ class JsonlCollector(BaseCollector):
 
         head_len = min(HEAD_FINGERPRINT_BYTES, offset)
         state = FileState(
-            inode=post.st_ino,
+            inode=stable_inode(post),
             size=max(post.st_size, offset),
             mtime_ns=post.st_mtime_ns,
             offset=offset,

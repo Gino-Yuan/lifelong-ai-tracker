@@ -17,7 +17,7 @@ SCHEMA_VERSION = "1"
 
 
 def _schema_sql() -> str:
-    return resources.files("lifelong_tracker.storage").joinpath("schema.sql").read_text("utf-8")
+    return resources.files("lifelong_tracker.storage").joinpath("schema.sql").read_text(encoding="utf-8")
 
 
 def _now() -> str:

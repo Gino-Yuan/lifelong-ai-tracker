@@ -44,9 +44,9 @@ _ids = itertools.count(1)
 def pricing_path(tmp_path) -> Path:
     p = tmp_path / "prices" / "pricing.json"
     p.parent.mkdir()
-    raw = json.loads(TEST_PRICING.read_text())
+    raw = json.loads(TEST_PRICING.read_text(encoding="utf-8"))
     raw["models"][CODEX_MODEL] = dict(CODEX_PRICE)
-    p.write_text(json.dumps(raw, indent=2))
+    p.write_text(json.dumps(raw, indent=2), encoding="utf-8")
     return p
 
 
@@ -188,10 +188,10 @@ def test_sync_other_tools_cost_exactly_as_before(db, pricing_path):
 # --------------------------------------------------------------------------- reprice
 
 def _bump_prices(pricing_path: Path) -> dict:
-    raw = json.loads(pricing_path.read_text())
+    raw = json.loads(pricing_path.read_text(encoding="utf-8"))
     raw["models"][CODEX_MODEL] = {"input": 2.0, "output": 16.0, "cache_read": 0.2, "cache_write": 0.0}
     raw["models"]["claude-sonnet-4-5"]["input"] = 4.0
-    pricing_path.write_text(json.dumps(raw, indent=2))
+    pricing_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
     return raw
 
 
@@ -329,11 +329,11 @@ def test_card_and_cli_handle_missing_breakdown(db, pricing_path):
 
 
 def test_dashboard_shows_dash_and_subtitle():
-    js = (STATIC_DIR / "app.js").read_text()
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     assert 'noBreakdown ? "—" : fmtPct(t.cache_hit_rate)' in js
     assert '"No cache breakdown"' in js
     assert 'const HIT_SUB = "Cache read ÷ (input + cache read + cache write)";' in js
-    html = (STATIC_DIR / "index.html").read_text()
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     assert 'id="kpi-hit-sub">Cache read ÷ (input + cache read + cache write)<' in html
 
 
@@ -341,10 +341,12 @@ def test_dashboard_shows_dash_and_subtitle():
 
 def test_shipped_pricing_has_estimated_fallback_entries():
     from lifelong_tracker.config import DEFAULT_PRICING_PATH
-    raw = json.loads(Path(DEFAULT_PRICING_PATH).read_text())
+    raw = json.loads(Path(DEFAULT_PRICING_PATH).read_text(encoding="utf-8"))
     want = {"input": 2.0, "output": 10.0, "thinking": 10.0, "cache_read": 0.20, "cache_write": 0.0}
     table = PricingTable.load(DEFAULT_PRICING_PATH)
-    for name in ("unknown", "codex-auto-review"):
-        assert raw["models"][name] == want
-        assert table.lookup(name)[0] == name
-    assert any("unknown" in n and "codex-auto-review" in n and "Estimate" in n for n in raw["_meta"]["notes"])
+    assert raw["models"]["codex-auto-review"] == want
+    assert table.lookup("codex-auto-review")[0] == "codex-auto-review"
+    assert any("codex-auto-review" in n and "Estimate" in n for n in raw["_meta"]["notes"])
+    # no personal guess for events whose log names no model: they stay unpriced
+    assert "unknown" not in raw["models"] and table.lookup("unknown") is None
+    assert not any("'unknown'" in n for n in raw["_meta"]["notes"])

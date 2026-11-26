@@ -24,7 +24,7 @@ tracker = "lifelong_tracker.cli:app"
 where = ["src"]
 
 [tool.setuptools.package-data]
-lifelong_tracker = ["storage/schema.sql", "web/static/*"]
+lifelong_tracker = ["storage/schema.sql", "web/static/*", "default_pricing.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -210,24 +210,38 @@ def _price_row(provider: str, key: str, price, segments, used: bool) -> dict:
 
 
 class _PricingCache:
-    """Reload pricing.json whenever its mtime changes (edits show up without restart)."""
+    """Reload pricing.json whenever its mtime changes (edits show up without restart).
 
-    def __init__(self, path: Path):
+    While `path` does not exist, the bundled `seed` table (if any) is read instead.
+    """
+
+    def __init__(self, path: Path, seed: Optional[Path] = None):
         self.path = Path(path)
-        self._mtime: Optional[int] = None
+        self.seed = None if seed is None else Path(seed)
+        self._mtime: Optional[tuple[str, int]] = None
         self._table: Optional[PricingTable] = None
         self._meta: dict = {}
 
+    def source(self) -> Path:
+        """The file prices are read from: pricing.json, or the seed until it exists."""
+        if self.seed is not None and not self.path.exists():
+            return self.seed
+        return self.path
+
+    def _stamp(self) -> tuple[str, int]:
+        src = self.source()
+        return str(src), src.stat().st_mtime_ns
+
     def _load(self) -> None:
-        mtime = self.path.stat().st_mtime_ns
-        raw = json.loads(self.path.read_text(encoding="utf-8"))
+        stamp = self._stamp()
+        raw = json.loads(Path(stamp[0]).read_text(encoding="utf-8"))
         table = PricingTable.from_dict(raw)
         meta = raw.get("_meta") if isinstance(raw, dict) else None
-        self._table, self._meta, self._mtime = table, meta if isinstance(meta, dict) else {}, mtime
+        self._table, self._meta, self._mtime = table, meta if isinstance(meta, dict) else {}, stamp
 
     def get(self) -> PricingTable:
         try:
-            if self._table is None or self.path.stat().st_mtime_ns != self._mtime:
+            if self._table is None or self._stamp() != self._mtime:
                 self._load()
         except (OSError, ValueError) as exc:
             raise HTTPException(500, f"Cannot load pricing file: {exc}") from exc
@@ -378,8 +392,13 @@ def create_app(
     *,
     subscriptions_path: Optional[Path] = None,
     sources_path: Optional[Path] = None,
+    pricing_seed: Optional[Path] = None,
 ) -> FastAPI:
-    """`subscriptions_path` / `sources_path` = None disables editing fees / Sync Now."""
+    """`subscriptions_path` / `sources_path` = None disables editing fees / Sync Now.
+
+    `pricing_seed` = the bundled default table, read while `pricing_path` does not
+    exist; the first price edit then writes a complete copy to `pricing_path`.
+    """
     app = FastAPI(
         title="Lifelong AI Tracker",
         version=__version__,
@@ -387,7 +406,7 @@ def create_app(
         redoc_url=None,
         openapi_url=None,
     )
-    pricing_cache = _PricingCache(pricing_path)
+    pricing_cache = _PricingCache(pricing_path, pricing_seed)
     write_lock = threading.Lock()   # pricing.json / subscriptions.json writes
     sync_lock = threading.Lock()    # one Sync Now at a time
 
@@ -772,7 +791,7 @@ def create_app(
         updated = meta.get("updated")
         if not (isinstance(updated, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", updated)):
             try:  # no usable _meta.updated: fall back to the file's modification day
-                updated = date.fromtimestamp(pricing_path.stat().st_mtime).isoformat()
+                updated = date.fromtimestamp(pricing_cache.source().stat().st_mtime).isoformat()
             except OSError:
                 updated = None
         entries = table.entries()
@@ -797,7 +816,8 @@ def create_app(
         prices = body.model_dump(exclude={"model"}, exclude_none=True)
         with write_lock:
             try:
-                update = set_model_price(pricing_path, body.model, prices, updated=today().isoformat())
+                update = set_model_price(pricing_path, body.model, prices, updated=today().isoformat(),
+                                         seed=pricing_seed)
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from exc
             except OSError as exc:

@@ -99,7 +99,7 @@ def test_discover_skips_symlinked_db_in_directory(oc, oc_db, tmp_path):
 
 def test_discover_rejects_non_sqlite_file(oc, tmp_path):
     bogus = tmp_path / "opencode.db"
-    bogus.write_text("not a database")
+    bogus.write_text("not a database", encoding="utf-8")
     with pytest.raises(ValueError, match="not an SQLite database"):
         oc.discover(bogus)
     assert oc.discover(tmp_path) == []  # in a directory it is simply not picked up
@@ -409,7 +409,7 @@ def test_cli_rejects_file_for_directory_tools(db_path, oc_db):
 
 def test_cli_reports_bad_database_without_creating_ledger(db_path, tmp_path):
     bogus = tmp_path / "opencode.db"
-    bogus.write_text("nope")
+    bogus.write_text("nope", encoding="utf-8")
     r = runner.invoke(app, ["sync", "--source", str(bogus), "--tool", "opencode", "--db", str(db_path)])
     assert r.exit_code == 2 and "not an SQLite database" in r.output
     assert not db_path.exists()
@@ -433,7 +433,7 @@ def test_cli_collectors_lists_opencode_ready():
 
 def test_sync_all_accepts_db_file_path(db_path, oc_db, tmp_path):
     cfg = tmp_path / "sources.json"
-    cfg.write_text(json.dumps({"sources": [{"name": "oc", "tool": "opencode", "path": str(oc_db)}]}))
+    cfg.write_text(json.dumps({"sources": [{"name": "oc", "tool": "opencode", "path": str(oc_db)}]}), encoding="utf-8")
     r = runner.invoke(app, ["sync-all", "--config", str(cfg), "--db", str(db_path),
                             "--pricing", str(TEST_PRICING), "--quiet"])
     assert r.exit_code == 0, r.output

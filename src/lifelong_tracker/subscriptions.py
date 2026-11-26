@@ -58,7 +58,7 @@ from typing import Any, Mapping, Sequence
 
 from lifelong_tracker import analytics
 from lifelong_tracker.collectors import COLLECTORS, TOOL_ORDER
-from lifelong_tracker.pricing import _atomic_write_text
+from lifelong_tracker.fsutil import atomic_write_text
 
 MAX_MONTHLY_USD = 10_000.0
 MAX_PERIODS = 48  # per tool
@@ -242,7 +242,7 @@ def save_subscriptions(path: Path, plans: Mapping[str, Any]) -> Plans:
     text = json.dumps(body, indent=2, ensure_ascii=False) + "\n"
     stored = validate_file(json.loads(text))  # never write what would not load back
     path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_text(path, text)
+    atomic_write_text(path, text)
     return stored
 
 

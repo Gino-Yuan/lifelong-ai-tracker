@@ -49,10 +49,10 @@ def _digest(p: Path) -> str:
 def pricing_file(tmp_path) -> Path:
     dst = tmp_path / "prices" / "pricing.json"
     dst.parent.mkdir()
-    raw = json.loads(TEST_PRICING.read_text())
+    raw = json.loads(TEST_PRICING.read_text(encoding="utf-8"))
     raw["_meta"].update({"currency": "USD", "unit": "per_million_tokens", "updated": "2026-11-01"})
     raw["models"].update(EXTRA)
-    dst.write_text(json.dumps(raw, indent=2))
+    dst.write_text(json.dumps(raw, indent=2), encoding="utf-8")
     return dst
 
 
@@ -164,7 +164,7 @@ def test_updated_falls_back_to_file_date(tmp_path, meta):
     raw = {"models": {"claude-sonnet-4-5": {"input": 3, "output": 15, "cache_read": 0.3, "cache_write": 3.75}}}
     if meta is not None:
         raw["_meta"] = meta
-    p.write_text(json.dumps(raw))
+    p.write_text(json.dumps(raw), encoding="utf-8")
     stamp = date(2026, 10, 3)
     ts = int(__import__("datetime").datetime(2026, 10, 3, 12).timestamp())
     os.utime(p, (ts, ts))
@@ -175,9 +175,9 @@ def test_updated_falls_back_to_file_date(tmp_path, meta):
 
 def test_external_edit_is_picked_up(client, pricing_file):
     assert client.get("/api/pricing").json()["count"] == 9
-    raw = json.loads(pricing_file.read_text())
+    raw = json.loads(pricing_file.read_text(encoding="utf-8"))
     raw["models"]["gemini-3-flash"] = {"input": 0.5, "output": 3.0, "cache_read": 0.05, "cache_write": 0.0}
-    pricing_file.write_text(json.dumps(raw))
+    pricing_file.write_text(json.dumps(raw), encoding="utf-8")
     st = pricing_file.stat()
     os.utime(pricing_file, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000))
     body = client.get("/api/pricing").json()
@@ -186,7 +186,7 @@ def test_external_edit_is_picked_up(client, pricing_file):
 
 def test_broken_pricing_file_is_a_500_not_a_crash(ledger, tmp_path):
     p = tmp_path / "pricing.json"
-    p.write_text("{ not json")
+    p.write_text("{ not json", encoding="utf-8")
     r = client_for(ledger, p).get("/api/pricing")
     assert r.status_code == 500 and "Cannot load pricing file" in r.json()["detail"]
 
@@ -227,7 +227,7 @@ def test_edit_existing_model_updates_table_file_and_costs(client, ledger, pricin
             assert rows[name] == before[name]
 
     # pricing.json on disk: entry replaced in place, _meta kept + updated stamped
-    raw = json.loads(pricing_file.read_text())
+    raw = json.loads(pricing_file.read_text(encoding="utf-8"))
     assert raw["models"]["claude-sonnet-4-5"] == new
     assert raw["_meta"]["note"].startswith("Frozen test prices") and raw["_meta"]["updated"] == "2026-11-26"
     assert list(raw["models"]).index("claude-sonnet-4-5") == 0  # original position
@@ -287,16 +287,16 @@ def test_rejected_edit_leaves_table_unchanged(client, pricing_file):
 def test_set_model_price_stamps_updated(pricing_file):
     set_model_price(pricing_file, "gpt-6-sol", {"input": 1, "output": 2, "cache_read": 0, "cache_write": 0},
                     updated="2026-12-01")
-    raw = json.loads(pricing_file.read_text())
+    raw = json.loads(pricing_file.read_text(encoding="utf-8"))
     assert raw["_meta"]["updated"] == "2026-12-01" and raw["_meta"]["currency"] == "USD"
 
 
 def test_set_model_price_creates_meta_first_when_missing(tmp_path):
     p = tmp_path / "pricing.json"
-    p.write_text(json.dumps({"models": {}}))
+    p.write_text(json.dumps({"models": {}}), encoding="utf-8")
     set_model_price(p, "gpt-6-sol", {"input": 1, "output": 2, "cache_read": 0, "cache_write": 0},
                     updated="2026-12-01")
-    raw = json.loads(p.read_text())
+    raw = json.loads(p.read_text(encoding="utf-8"))
     assert list(raw) == ["_meta", "models"] and raw["_meta"] == {"updated": "2026-12-01"}
 
 
@@ -310,9 +310,9 @@ def test_set_model_price_rejects_bad_updated(pricing_file, bad):
 
 
 def test_set_model_price_without_updated_keeps_meta(pricing_file):
-    meta = json.loads(pricing_file.read_text())["_meta"]
+    meta = json.loads(pricing_file.read_text(encoding="utf-8"))["_meta"]
     set_model_price(pricing_file, "gpt-6-sol", {"input": 1, "output": 2, "cache_read": 0, "cache_write": 0})
-    assert json.loads(pricing_file.read_text())["_meta"] == meta
+    assert json.loads(pricing_file.read_text(encoding="utf-8"))["_meta"] == meta
 
 
 # ------------------------------------------------------------------ frontend wiring
@@ -360,7 +360,7 @@ def test_js_wiring():
 def test_app_js_syntax_jsc():
     script = 'try { new Function(readFile(arguments[0])); print("SYNTAX_OK"); } catch (e) { print("SYNTAX_ERROR " + e); }'
     out = subprocess.run([str(JSC), "-e", script, "--", str(STATIC_DIR / "app.js")],
-                         capture_output=True, text=True, timeout=60)
+                         capture_output=True, text=True, timeout=60, encoding="utf-8")
     assert out.stdout.strip() == "SYNTAX_OK", out.stdout + out.stderr
 
 
@@ -374,9 +374,9 @@ def test_pricing_modal_runtime_jsc(tmp_path):
                         ("deepseek-v4", EXTRA["deepseek-v4"])]:
         set_model_price(p, name, price, updated="2026-11-26")
     resp = tmp_path / "pricing_resp.json"
-    resp.write_text(client_for(tmp_path / "none.db", p).get("/api/pricing").text)
+    resp.write_text(client_for(tmp_path / "none.db", p).get("/api/pricing").text, encoding="utf-8")
     out = subprocess.run([str(JSC), str(STUB_DOM), str(SMOKE), "--", str(STATIC_DIR / "app.js"), str(resp)],
-                         capture_output=True, text=True, timeout=60)
+                         capture_output=True, text=True, timeout=60, encoding="utf-8")
     lines = out.stdout.strip().splitlines()
     assert lines and lines[-1] == "SMOKE_OK", out.stdout + out.stderr
     assert not [ln for ln in lines if ln.startswith("FAIL")]

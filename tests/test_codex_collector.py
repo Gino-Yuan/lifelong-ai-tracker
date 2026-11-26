@@ -119,7 +119,7 @@ def test_discover_ignores_other_state_versions(cx, tmp_path):
 
 def test_discover_rejects_non_sqlite_file(cx, tmp_path):
     bogus = tmp_path / "state_5.sqlite"
-    bogus.write_text("not a database")
+    bogus.write_text("not a database", encoding="utf-8")
     with pytest.raises(ValueError, match="not an SQLite database"):
         cx.discover(bogus)
     assert cx.discover(tmp_path) == []
@@ -430,7 +430,7 @@ def test_cli_collectors_lists_codex_ready():
 
 def test_sync_all_accepts_db_file_path(db_path, cx_db, tmp_path):
     cfg = tmp_path / "sources.json"
-    cfg.write_text(json.dumps({"sources": [{"name": "codex", "tool": "codex", "path": str(cx_db)}]}))
+    cfg.write_text(json.dumps({"sources": [{"name": "codex", "tool": "codex", "path": str(cx_db)}]}), encoding="utf-8")
     r = runner.invoke(app, ["sync-all", "--config", str(cfg), "--db", str(db_path),
                             "--pricing", str(TEST_PRICING), "--quiet"])
     assert r.exit_code == 0, r.output

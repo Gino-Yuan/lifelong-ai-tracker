@@ -18,7 +18,8 @@ Incremental state (stored in the generic FileState):
                              harmless). `offset` / `head_len` stay 0: they are byte
                              positions for JSONL files and the ledger requires
                              offset <= size;
-* different inode          -> database replaced -> rescan from 0;
+* different inode          -> database replaced -> rescan from 0 (inode masked to 63 bits;
+                              0 = unknown, then only size / mtime / the mark decide);
 * newest row older than the mark -> database restored from an older copy -> rescan.
 """
 
@@ -32,6 +33,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, ClassVar
 
 from lifelong_tracker.collectors.base import BaseCollector, FileScan
+from lifelong_tracker.fsutil import inode_replaced, stable_inode
 from lifelong_tracker.models import FileState, UsageEvent
 
 SQLITE_MAGIC = b"SQLite format 3\x00"
@@ -112,7 +114,7 @@ def signature(path: Path) -> tuple[int, int, int]:
     else:
         size += wst.st_size
         mtime = max(mtime, wst.st_mtime_ns)
-    return st.st_ino, size, mtime
+    return stable_inode(st), size, mtime
 
 
 def read_mark(state: FileState) -> int:
@@ -174,9 +176,10 @@ class SqliteCollector(BaseCollector):
         prev_rows = prev_resets = 0
         if checkpoint is not None:
             prev_rows, prev_resets = checkpoint.lines_read, checkpoint.resets
-            if (inode, size, mtime) == (checkpoint.inode, checkpoint.size, checkpoint.mtime_ns):
+            if (not inode_replaced(checkpoint.inode, inode)
+                    and (size, mtime) == (checkpoint.size, checkpoint.mtime_ns)):
                 return FileScan(path=path, state=checkpoint, unchanged=True)
-            if inode != checkpoint.inode:
+            if inode_replaced(checkpoint.inode, inode):
                 reset = "replaced"
             else:
                 mark = read_mark(checkpoint)

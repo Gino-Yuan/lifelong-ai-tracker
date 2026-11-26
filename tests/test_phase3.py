@@ -107,7 +107,7 @@ def test_load_sources_resolves_paths_and_defaults(tmp_path):
 
 def test_load_sources_accepts_bare_list(tmp_path):
     cfg = tmp_path / "s.json"
-    cfg.write_text(json.dumps([{"tool": "claude-code", "path": "."}]))
+    cfg.write_text(json.dumps([{"tool": "claude-code", "path": "."}]), encoding="utf-8")
     assert len(load_sources(cfg)) == 1
 
 
@@ -127,7 +127,7 @@ def test_load_sources_accepts_bare_list(tmp_path):
 )
 def test_load_sources_rejects_bad_config(tmp_path, content, message):
     cfg = tmp_path / "bad.json"
-    cfg.write_text(content)
+    cfg.write_text(content, encoding="utf-8")
     with pytest.raises(SourcesConfigError, match=message):
         load_sources(cfg)
 
@@ -140,7 +140,7 @@ def test_load_sources_missing_file(tmp_path):
 def test_example_config_is_valid_and_gitignore_covers_phase3():
     specs = load_sources(PROJECT_ROOT / "sources.example.json")
     assert {s.tool for s in specs} == {"claude-code", "antigravity", "opencode", "codex", "t3"}
-    ignored = (PROJECT_ROOT / ".gitignore").read_text().split()
+    ignored = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8").split()
     for entry in ("sources.json", "logs/", "backups/", "data/"):
         assert entry in ignored
 
@@ -206,7 +206,7 @@ def test_cli_sync_all_exit_codes_and_quiet(db_path, claude_source, tmp_path):
 
 def test_cli_sync_all_config_error_is_exit_2(db_path, tmp_path):
     bad = tmp_path / "bad.json"
-    bad.write_text("[{]")
+    bad.write_text("[{]", encoding="utf-8")
     r = _invoke("sync-all", "--config", bad, "--db", db_path, "--pricing", TEST_PRICING)
     assert r.exit_code == 2 and "config error" in r.output
     assert not db_path.exists()
@@ -250,8 +250,8 @@ def test_backup_is_consistent_while_writer_holds_wal(db_path, pricing, claude_so
 def test_backup_rotation_keeps_newest_and_ignores_other_files(ledger, tmp_path):
     out = tmp_path / "rot"
     out.mkdir()
-    (out / "notes.txt").write_text("keep me")
-    (out / "tracker-latest.db").write_text("not a backup name")
+    (out / "notes.txt").write_text("keep me", encoding="utf-8")
+    (out / "tracker-latest.db").write_text("not a backup name", encoding="utf-8")
     for day in range(1, 7):
         backup_database(ledger, out, keep=100, now=datetime(2026, 3, day, 23, 30, 0))
     assert len(list_backups(out)) == 6
@@ -260,7 +260,7 @@ def test_backup_rotation_keeps_newest_and_ignores_other_files(ledger, tmp_path):
     names = [p.name for p in list_backups(out)]
     assert names == ["tracker-20260305-233000.db", "tracker-20260306-233000.db", "tracker-20260307-233000.db"]
     assert len(res.removed) == 4 and len(res.kept) == 3
-    assert (out / "notes.txt").read_text() == "keep me"
+    assert (out / "notes.txt").read_text(encoding="utf-8") == "keep me"
     assert (out / "tracker-latest.db").exists()
 
 
@@ -374,7 +374,7 @@ def test_schedule_render_rejects_bad_input(tmp_path, sched_cfg, extra):
 
 def test_schedule_render_rejects_invalid_config(tmp_path):
     bad = tmp_path / "s.json"
-    bad.write_text(json.dumps({"sources": [{"tool": "claude-code"}]}))
+    bad.write_text(json.dumps({"sources": [{"tool": "claude-code"}]}), encoding="utf-8")
     out = tmp_path / "p.plist"
     r = _invoke("schedule", "render", "--config", bad, "--out", out, "--log-file", tmp_path / "l.log")
     assert r.exit_code == 2 and not out.exists()
@@ -509,7 +509,7 @@ def test_cli_card(ledger, tmp_path):
     assert "Lifelong AI Usage" in _visible_text(_svg_root(svg))
 
     r = _invoke("card", "--range", "year", "--out", tmp_path / "y.svg", "--db", ledger)
-    assert r.exit_code == 0 and "AI Usage" in (tmp_path / "y.svg").read_text()
+    assert r.exit_code == 0 and "AI Usage" in (tmp_path / "y.svg").read_text(encoding="utf-8")
 
     r = _invoke("card", "--range", "decade", "--out", tmp_path / "z.svg", "--db", ledger)
     assert r.exit_code == 2 and not (tmp_path / "z.svg").exists()
@@ -558,10 +558,10 @@ def test_api_card_empty_ledger_and_host_guard(db_path):
 
 
 def test_dashboard_has_export_card_button():
-    html = (STATIC_DIR / "index.html").read_text()
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     assert 'id="export-card"' in html and "Export Card (SVG)" in html
     assert "/api/card?range=" in html
-    js = (STATIC_DIR / "app.js").read_text()
+    js = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
     # the link follows the current range *and* tool / model scope (see qs() in app.js)
     assert '$("export-card").href = `/api/card?${qs({ download: "1" })}`' in js
     assert 'p.set("range", state.range)' in js

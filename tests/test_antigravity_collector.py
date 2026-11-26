@@ -80,7 +80,7 @@ def test_discover_only_system_generated_transcripts(ag):
 def test_discover_skips_symlinks(ag, ag_source, tmp_path):
     outside = tmp_path / "outside" / "conv-x" / ".system_generated" / "logs"
     outside.mkdir(parents=True)
-    (outside / "transcript.jsonl").write_text("")
+    (outside / "transcript.jsonl").write_text("", encoding="utf-8")
     link = ag_source / "conv-link" / ".system_generated" / "logs"
     link.mkdir(parents=True)
     (link / "transcript.jsonl").symlink_to(outside / "transcript.jsonl")
@@ -250,7 +250,7 @@ def test_cli_sync_and_sync_all(db_path, ag_source, tmp_path):
     assert len(_rows(db_path)) == 4
 
     cfg = tmp_path / "sources.json"
-    cfg.write_text(json.dumps({"sources": [{"name": "ag", "tool": "antigravity", "path": str(ag_source)}]}))
+    cfg.write_text(json.dumps({"sources": [{"name": "ag", "tool": "antigravity", "path": str(ag_source)}]}), encoding="utf-8")
     db2 = tmp_path / "second" / "t.db"
     r = runner.invoke(app, ["sync-all", "--config", str(cfg), "--db", str(db2),
                             "--pricing", str(TEST_PRICING), "--quiet"])

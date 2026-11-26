@@ -70,7 +70,7 @@ def test_cost_for_unpriced_is_none(pricing):
 )
 def test_invalid_pricing_rejected(tmp_path, spec, message):
     path = tmp_path / "bad.json"
-    path.write_text(json.dumps(spec))
+    path.write_text(json.dumps(spec), encoding="utf-8")
     with pytest.raises(ValueError, match=message):
         PricingTable.load(path)
 

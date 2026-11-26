@@ -68,7 +68,7 @@ def test_default_tracker_bin_and_out(tmp_path):
 def sched_cfg(tmp_path) -> Path:
     cfg = tmp_path / "cfg" / "sources.json"
     cfg.parent.mkdir()
-    cfg.write_text(json.dumps({"sources": [{"tool": "claude-code", "path": str(tmp_path / "logs-src")}]}))
+    cfg.write_text(json.dumps({"sources": [{"tool": "claude-code", "path": str(tmp_path / "logs-src")}]}), encoding="utf-8")
     return cfg
 
 
@@ -97,7 +97,7 @@ def test_render_linux_writes_systemd_pair_and_crontab(tmp_path, sched_cfg):
                             out.with_name("com.lifelong-tracker.sync.crontab"))
     assert sorted(p.name for p in out.parent.iterdir()) == sorted([service.name, timer.name, cron.name])
 
-    svc = service.read_text()
+    svc = service.read_text(encoding="utf-8")
     assert "[Service]" in svc and "Type=oneshot" in svc
     assert f"WorkingDirectory={PROJECT_ROOT}" in svc
     exec_line = next(ln for ln in svc.splitlines() if ln.startswith("ExecStart="))
@@ -107,11 +107,11 @@ def test_render_linux_writes_systemd_pair_and_crontab(tmp_path, sched_cfg):
     log = tmp_path / "logs" / "sync.log"
     assert f"StandardOutput=append:{log}" in svc and f"StandardError=append:{log}" in svc
 
-    tim = timer.read_text()
+    tim = timer.read_text(encoding="utf-8")
     assert "OnCalendar=*-*-* 06:05:00" in tim and "Persistent=true" in tim
     assert "Unit=com.lifelong-tracker.sync.service" in tim and "WantedBy=timers.target" in tim
 
-    line = [ln for ln in cron.read_text().splitlines() if not ln.startswith("#")]
+    line = [ln for ln in cron.read_text(encoding="utf-8").splitlines() if not ln.startswith("#")]
     assert len(line) == 1
     assert line[0].startswith("5 6 * * * cd ")
     assert line[0].endswith(f"2>&1 {sched.CRON_MARKER}com.lifelong-tracker.sync")
@@ -139,7 +139,7 @@ def test_render_linux_adds_suffix_when_out_has_none(tmp_path, sched_cfg):
     assert r.exit_code == 0, r.output
     assert sorted(p.name for p in (tmp_path / "out").iterdir()) == [
         "nightly.crontab", "nightly.service", "nightly.timer"]
-    assert "Unit=nightly.service" in (tmp_path / "out" / "nightly.timer").read_text()
+    assert "Unit=nightly.service" in (tmp_path / "out" / "nightly.timer").read_text(encoding="utf-8")
     assert "systemctl --user enable --now nightly.timer" in r.output
 
 
@@ -245,7 +245,7 @@ def test_sources_billing_field(tmp_path):
         {"name": "plan", "tool": "claude-code", "path": "a"},
         {"name": "key", "tool": "claude-code", "path": "b", "billing": "api"},
         {"name": "plan2", "tool": "codex", "path": "c", "billing": "subscription"},
-    ]}))
+    ]}), encoding="utf-8")
     specs = sources_mod.load_sources(cfg)
     assert [s.billing for s in specs] == ["subscription", "api", "subscription"]
 
@@ -253,7 +253,7 @@ def test_sources_billing_field(tmp_path):
 @pytest.mark.parametrize("bad", ["API", "metered", "", None, 1, True])
 def test_sources_billing_rejects_unknown_values(tmp_path, bad):
     cfg = tmp_path / "sources.json"
-    cfg.write_text(json.dumps([{"tool": "claude-code", "path": "a", "billing": bad}]))
+    cfg.write_text(json.dumps([{"tool": "claude-code", "path": "a", "billing": bad}]), encoding="utf-8")
     with pytest.raises(sources_mod.SourcesConfigError, match="billing"):
         sources_mod.load_sources(cfg)
 
@@ -291,10 +291,10 @@ def billing_world(tmp_path):
         {"name": "plan", "tool": "claude-code", "path": "logs/plan"},
         {"name": "key", "tool": "claude-code", "path": "logs/api-key", "billing": "api"},
         {"name": "team", "tool": "claude-code", "path": "logs/api-key/team-plan", "billing": "subscription"},
-    ]}))
+    ]}), encoding="utf-8")
     subs = tmp_path / "subscriptions.json"
     subs.write_text(json.dumps({"subscriptions": {"claude-code": [
-        {"start": "2026-11-01", "end": None, "monthly_usd": 20.0}]}}))
+        {"start": "2026-11-01", "end": None, "monthly_usd": 20.0}]}}), encoding="utf-8")
     db = tmp_path / "ledger" / "tracker.db"
     pricing = PricingTable.load(TEST_PRICING)
     with connect(db) as conn:
@@ -378,17 +378,17 @@ def test_overview_api_only_without_subscriptions(billing_world):
 
 def test_overview_without_api_sources_is_unchanged(billing_world):
     cfg = billing_world["cfg"]
-    raw = json.loads(cfg.read_text())
+    raw = json.loads(cfg.read_text(encoding="utf-8"))
     for s in raw["sources"]:
         s.pop("billing", None)
-    cfg.write_text(json.dumps(raw))
+    cfg.write_text(json.dumps(raw), encoding="utf-8")
     ov = _client(billing_world).get("/api/overview", params={"range": "30d"}).json()
     assert ov["billing"] is None
     assert ov["subscription"]["value_usd"] == pytest.approx(14.0)
     assert ov["subscription"]["api_direct_spend_usd"] == 0.0
     # no sources file at all, or a broken one: same as "no API sources"
     assert _client(billing_world, sources=False).get("/api/overview").json()["billing"] is None
-    cfg.write_text("{ broken")
+    cfg.write_text("{ broken", encoding="utf-8")
     assert _client(billing_world).get("/api/overview").json()["billing"] is None
 
 
@@ -521,7 +521,7 @@ def _event(msg, ts, inp=0, cr=0):
 @pytest.fixture
 def dated_ledger(tmp_path):
     p = tmp_path / "pricing.json"
-    p.write_text(json.dumps(DATED))
+    p.write_text(json.dumps(DATED), encoding="utf-8")
     db = tmp_path / "ledger" / "t.db"
     with connect(db) as conn:
         conn.execute("BEGIN")
@@ -550,9 +550,9 @@ def test_ingest_prices_each_event_on_its_utc_day(dated_ledger):
 
 def test_reprice_and_drift_across_a_price_change(dated_ledger):
     db, p = dated_ledger
-    raw = json.loads(p.read_text())
+    raw = json.loads(p.read_text(encoding="utf-8"))
     raw["models"][HAIKU][1]["input"] = 8.0   # the December price changes
-    p.write_text(json.dumps(raw))
+    p.write_text(json.dumps(raw), encoding="utf-8")
     table = PricingTable.load(p)
     with connect(db) as conn:
         assert pricing_drift(conn, table) == [HAIKU]
@@ -563,7 +563,7 @@ def test_reprice_and_drift_across_a_price_change(dated_ledger):
                           "new": pytest.approx(8.0), "later": pytest.approx(4.0)}
 
     raw["models"][HAIKU] = {"input": 1.0, "output": 0, "cache_read": 0, "cache_write": 0}  # back to one price
-    p.write_text(json.dumps(raw))
+    p.write_text(json.dumps(raw), encoding="utf-8")
     flat = PricingTable.load(p)
     with connect(db) as conn:
         assert pricing_drift(conn, flat) == [HAIKU]
@@ -573,7 +573,7 @@ def test_reprice_and_drift_across_a_price_change(dated_ledger):
 
 def test_cache_savings_uses_the_dated_rates(tmp_path):
     p = tmp_path / "pricing.json"
-    p.write_text(json.dumps(DATED))
+    p.write_text(json.dumps(DATED), encoding="utf-8")
     table = PricingTable.load(p)
     with connect(tmp_path / "t.db") as conn:
         conn.execute("BEGIN")
@@ -587,10 +587,10 @@ def test_cache_savings_uses_the_dated_rates(tmp_path):
 
 def test_set_model_price_edits_only_the_latest_segment(tmp_path):
     p = tmp_path / "pricing.json"
-    p.write_text(json.dumps(DATED))
+    p.write_text(json.dumps(DATED), encoding="utf-8")
     upd = set_model_price(p, HAIKU, {"input": 5.0, "output": 1.0, "cache_read": 0.2, "cache_write": 0.0})
     assert upd.replaced is True
-    entry = json.loads(p.read_text())["models"][HAIKU]
+    entry = json.loads(p.read_text(encoding="utf-8"))["models"][HAIKU]
     assert entry[0] == DATED["models"][HAIKU][0]
     assert entry[1] == {"effective_from": "2026-12-01", "input": 5.0, "output": 1.0, "cache_read": 0.2,
                         "cache_write": 0.0}
@@ -636,10 +636,10 @@ JS = Path(__file__).parent / "fixtures" / "js"
 def test_roi_card_billing_split_runtime_jsc(billing_world, tmp_path, mode):
     q = {"range": "30d"}
     if mode == "none":
-        raw = json.loads(billing_world["cfg"].read_text())
+        raw = json.loads(billing_world["cfg"].read_text(encoding="utf-8"))
         for s in raw["sources"]:
             s.pop("billing", None)
-        billing_world["cfg"].write_text(json.dumps(raw))
+        billing_world["cfg"].write_text(json.dumps(raw), encoding="utf-8")
     c = _client(billing_world, subs=mode != "apionly")
     rec = tmp_path / "recorded_billing.json"
     rec.write_text(json.dumps({  # real responses for everything the dashboard loads on boot
@@ -649,9 +649,9 @@ def test_roi_card_billing_split_runtime_jsc(billing_world, tmp_path, mode):
         "breakdown": c.get("/api/breakdown", params={**q, "group_variants": "true"}).json(),
         "hourly": c.get("/api/hourly", params=q).json(),
         "heatmap": c.get("/api/heatmap").json(),
-    }))
+    }), encoding="utf-8")
     out = subprocess.run([str(JSC), str(JS / "stub_dom.js"), str(JS / "billing_smoke.js"), "--",
-                          str(STATIC / "app.js"), str(rec), mode, "#range=30d"], capture_output=True, text=True, timeout=60)
+                          str(STATIC / "app.js"), str(rec), mode, "#range=30d"], capture_output=True, text=True, timeout=60, encoding="utf-8")
     lines = out.stdout.strip().splitlines()
     assert lines and lines[-1] == "SMOKE_OK", out.stdout + out.stderr
     assert sum(ln.startswith("PASS") for ln in lines) >= 4

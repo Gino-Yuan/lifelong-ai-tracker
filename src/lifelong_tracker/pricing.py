@@ -40,13 +40,13 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
-import tempfile
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any, Sequence
+
+from lifelong_tracker.fsutil import atomic_write_text
 
 PRICE_FIELDS = ("input", "output", "thinking", "cache_read", "cache_write")
 
@@ -398,24 +398,7 @@ def _format_pricing(raw: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _atomic_write_text(path: Path, text: str) -> None:
-    """Write via a temp file in the same directory + fsync + os.replace (never half-written)."""
-    path = Path(path)
-    mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
-    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-        raise
+_atomic_write_text = atomic_write_text  # kept for older imports
 
 
 @dataclass(frozen=True)
@@ -426,7 +409,8 @@ class PriceUpdate:
 
 
 def set_model_price(
-    path: Path, model: str, prices: dict[str, float], *, updated: str | None = None
+    path: Path, model: str, prices: dict[str, float], *, updated: str | None = None,
+    seed: Path | None = None,
 ) -> PriceUpdate:
     """Add or replace one model's price in pricing.json, atomically.
 
@@ -435,6 +419,8 @@ def set_model_price(
     (e.g. `_meta`) is preserved, except that `updated` (an ISO date), when given,
     is stored as `_meta.updated`. The new file is validated as a whole before it
     replaces the old one, so a bad value can never leave pricing.json broken.
+    When `path` does not exist yet, `seed` (the bundled default table) is the
+    starting point, so the first edit writes a complete pricing.json.
     """
     if updated is not None and not _DATE_ISO.match(updated):
         raise ValueError(f"updated must be an ISO date, got {updated!r}")
@@ -456,7 +442,8 @@ def set_model_price(
         raise ValueError(f"unknown price field(s): {', '.join(sorted(unknown))}")
 
     path = Path(path)
-    raw = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    source = path if path.exists() else (Path(seed) if seed is not None and Path(seed).is_file() else None)
+    raw = json.loads(source.read_text(encoding="utf-8")) if source is not None else {}
     if not isinstance(raw, dict):
         raise ValueError("pricing.json: top level must be an object")
     models = raw.setdefault("models", {})
@@ -484,5 +471,5 @@ def set_model_price(
         meta["updated"] = updated
     text = _format_pricing(raw)
     table = PricingTable.from_dict(json.loads(text))  # validate the whole file first
-    _atomic_write_text(path, text)
+    atomic_write_text(path, text)
     return PriceUpdate(key=key, replaced=existing is not None, table=table)

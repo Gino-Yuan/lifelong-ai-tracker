@@ -432,7 +432,7 @@ def test_custom_roi(db, pricing_path, tmp_path):
     subs = tmp_path / "subs" / "subscriptions.json"
     subs.parent.mkdir()
     subs.write_text(json.dumps({"subscriptions": {
-        "claude-code": [{"start": "2026-10-15", "end": None, "monthly_usd": 30.0}]}}))
+        "claude-code": [{"start": "2026-10-15", "end": None, "monthly_usd": 30.0}]}}), encoding="utf-8")
     c = client(db, pricing_path, subs=subs)
     sub = c.get("/api/overview", params=OCT).json()["subscription"]
     assert (sub["start"], sub["end"], sub["days"]) == ("2026-10-01", "2026-10-31", 31)
@@ -526,13 +526,13 @@ def recorded_ranges(tmp_path, db, pricing_path) -> Path:
     assert b["today|||"]["cost"] == {"hidden": True} and b["lifelong|||"]["tokens"] == {"hidden": True}
     assert b["custom|2026-09-10|2026-09-19|"]["tokens"]["text"] == "→ 0.0% vs prev 10d"
     out = tmp_path / "ranges.json"
-    out.write_text(json.dumps({"responses": R, "expect": X}))
+    out.write_text(json.dumps({"responses": R, "expect": X}), encoding="utf-8")
     return out
 
 
 def _run_jsc(*args: str) -> list[str]:
     out = subprocess.run([str(JSC), str(JS / "stub_dom.js"), str(JS / "range_smoke.js"), "--",
-                          str(STATIC_DIR / "app.js"), *args], capture_output=True, text=True, timeout=60)
+                          str(STATIC_DIR / "app.js"), *args], capture_output=True, text=True, timeout=60, encoding="utf-8")
     lines = out.stdout.strip().splitlines()
     assert lines and lines[-1] == "SMOKE_OK", out.stdout + out.stderr
     assert not [ln for ln in lines if ln.startswith("FAIL")]
