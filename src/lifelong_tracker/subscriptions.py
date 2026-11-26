@@ -35,18 +35,26 @@ Days after a plan ends cost $0 and add no value. An unbounded (lifelong) range
 starts at the earliest of the first active day of the paid tools in scope and
 their earliest plan start. The model filter is deliberately ignored: a plan pays
 for the whole tool, not for one model.
+
+API vs subscription billing: a source in sources.json marked `"billing": "api"`
+is paid per token with an API key. Its events (matched by the log file they were
+read from: the source whose folder is the longest prefix of that file's path)
+are left out of the plan value above and summed separately as direct API spend.
+Everything else, including events from files no source claims, counts as
+subscription usage, so a config without `billing` behaves exactly as before.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from lifelong_tracker import analytics
 from lifelong_tracker.collectors import COLLECTORS, TOOL_ORDER
@@ -243,6 +251,100 @@ def fee_on(periods: list[Period], day: date) -> float:
     return sum(p.monthly_usd for p in periods if p.covers(day))
 
 
+# --------------------------------------------------------------------------- billing
+
+@dataclass(frozen=True)
+class BillingRule:
+    """Events of `tool` read from files under `path` are billed as `billing`."""
+
+    tool: str
+    path: str  # absolute, resolved like the sync checkpoints' paths
+    billing: str
+
+
+def billing_rules(sources: Sequence[Any]) -> tuple[BillingRule, ...]:
+    """Rules from sources.json specs; empty when no source is marked `"billing": "api"`."""
+    if not any(getattr(s, "billing", "subscription") == "api" for s in sources):
+        return ()
+    rules = []
+    for s in sources:
+        path = str(Path(s.path).expanduser().resolve(strict=False))
+        rules.append(BillingRule(s.tool, path, getattr(s, "billing", "subscription")))
+    # longest path first: a nested source overrides the folder around it
+    return tuple(sorted(rules, key=lambda r: len(r.path), reverse=True))
+
+
+def _api_condition(rules: Sequence[BillingRule]) -> tuple[str, dict[str, Any]]:
+    """SQL (over events `e` joined to sync_checkpoints `c`) true for API-billed events."""
+    whens, params = [], {}
+    for i, r in enumerate(rules):
+        prefix = r.path if r.path.endswith(os.sep) else r.path + os.sep
+        whens.append(f"WHEN c.tool = :bt{i} AND (c.path = :bp{i} OR substr(c.path, 1, :bn{i}) = :bx{i}) "
+                     f"THEN :bb{i}")
+        params.update({f"bt{i}": r.tool, f"bp{i}": r.path, f"bn{i}": len(prefix),
+                       f"bx{i}": prefix, f"bb{i}": r.billing})
+    return f"(CASE {' '.join(whens)} ELSE 'subscription' END) = 'api'", params
+
+
+@dataclass(frozen=True)
+class ApiToolSpend:
+    tool: str
+    usd: float
+    events: int
+    unpriced_events: int
+    tokens: int
+
+
+@dataclass(frozen=True)
+class ApiSpend:
+    """Pay-as-you-go usage (sources marked `"billing": "api"`) in a local-day window."""
+
+    usd: float = 0.0
+    events: int = 0
+    unpriced_events: int = 0
+    tokens: int = 0
+    tools: list[ApiToolSpend] = field(default_factory=list)
+
+
+def api_spend(
+    conn: sqlite3.Connection,
+    rules: Sequence[BillingRule],
+    first: date | None,
+    last: date,
+    *,
+    tool: str | None = None,
+) -> ApiSpend:
+    """Direct API spend over [first, last] (local days; first=None = unbounded)."""
+    if not rules:
+        return ApiSpend()
+    cond, params = _api_condition(rules)
+    where = [cond, "date(e.timestamp, 'localtime') <= :last"]
+    params["last"] = last.isoformat()
+    if first is not None:
+        where.append("date(e.timestamp, 'localtime') >= :first")
+        params["first"] = first.isoformat()
+    if tool is not None:
+        where.append("e.tool = :tool")
+        params["tool"] = tool
+    rows = conn.execute(
+        "SELECT e.tool AS tool, COALESCE(SUM(e.cost_usd), 0) AS usd, COUNT(*) AS n, "
+        "COALESCE(SUM(CASE WHEN e.cost_usd IS NULL THEN 1 ELSE 0 END), 0) AS unpriced, "
+        "COALESCE(SUM(e.input_tokens + e.output_tokens + e.thinking_tokens + e.cache_read_tokens"
+        " + e.cache_write_tokens), 0) AS tokens "
+        "FROM events e JOIN sync_checkpoints c ON c.id = e.source_checkpoint_id "
+        f"WHERE {' AND '.join(where)} GROUP BY e.tool",
+        params,
+    ).fetchall()
+    rank = {t: i for i, t in enumerate(TOOL_ORDER)}
+    tools = sorted((ApiToolSpend(r["tool"], r["usd"], r["n"], r["unpriced"], r["tokens"]) for r in rows),
+                   key=lambda t: (rank.get(t.tool, len(rank)), t.tool))
+    return ApiSpend(
+        usd=sum(t.usd for t in tools), events=sum(t.events for t in tools),
+        unpriced_events=sum(t.unpriced_events for t in tools),
+        tokens=sum(t.tokens for t in tools), tools=tools,
+    )
+
+
 # --------------------------------------------------------------------------- ROI
 
 def _overlap(p: Period, lo: date, hi: date, today: date) -> tuple[date, date] | None:
@@ -258,8 +360,9 @@ class ToolValue:
     monthly_usd: float       # fee in force on the range's last day
     paid_days: int           # days of the range covered by a paid period
     plan_cost_usd: float
-    value_usd: float
+    value_usd: float         # subscription-billed usage only
     unpriced_events: int
+    api_spend_usd: float = 0.0  # this tool's API-billed usage in the range (not in value)
 
 
 @dataclass(frozen=True)
@@ -273,6 +376,7 @@ class Roi:
     multiple: float | None   # None when no paid plan overlaps the range
     unpriced_events: int
     tools: list[ToolValue]
+    api_direct_spend_usd: float = 0.0  # API-billed usage in the range, every tool in scope
 
 
 def subscription_roi(
@@ -282,8 +386,14 @@ def subscription_roi(
     today: date,
     *,
     tool: str | None = None,
+    sources: Sequence[Any] = (),
 ) -> Roi | None:
-    """ROI for the range, or None when no tool in scope has a paid (fee > 0) period at all."""
+    """ROI for the range, or None when no tool in scope has a paid (fee > 0) period at all.
+
+    `sources` (sources.json specs) carry the `billing` mode: usage from sources
+    marked "api" is excluded from the plan value and reported as direct API spend.
+    """
+    rules = billing_rules(sources)
     all_plans = as_plans(plans)
     paid = {
         t: [p for p in ps if p.monthly_usd > 0]
@@ -293,6 +403,8 @@ def subscription_roi(
     if not paid:
         return None
     start, end = analytics.range_bounds(range_name, today)
+    direct = api_spend(conn, rules, start, end, tool=tool)
+    direct_by_tool = {t.tool: t.usd for t in direct.tools}
     if start is None:
         marks = ",".join("?" * len(paid))
         first = conn.execute(
@@ -315,9 +427,11 @@ def subscription_roi(
             covered += n
             cost += n / DAYS_PER_MONTH * p.monthly_usd
             tot = analytics.summarize_span(conn, span[0], span[1], tool=t)
-            value += tot.cost_usd
-            unpriced += tot.unpriced_events
-        rows.append(ToolValue(t, fee_on(paid[t], end), covered, cost, value, unpriced))
+            api = api_spend(conn, rules, span[0], span[1], tool=t)
+            value += max(0.0, tot.cost_usd - api.usd)
+            unpriced += max(0, tot.unpriced_events - api.unpriced_events)
+        rows.append(ToolValue(t, fee_on(paid[t], end), covered, cost, value, unpriced,
+                              direct_by_tool.get(t, 0.0)))
 
     plan = sum(r.plan_cost_usd for r in rows)
     value = sum(r.value_usd for r in rows)
@@ -326,4 +440,5 @@ def subscription_roi(
         plan_cost_usd=plan, value_usd=value,
         multiple=(value / plan) if plan > 0 else None,
         unpriced_events=sum(r.unpriced_events for r in rows), tools=rows,
+        api_direct_spend_usd=direct.usd,
     )

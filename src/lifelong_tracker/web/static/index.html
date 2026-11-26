@@ -101,6 +101,7 @@
         <p class="kpi-value kpi-plan-spent"><span id="kpi-roi-spent">–</span> <span class="kpi-plan-unit" id="kpi-roi-unit">spent</span></p>
         <p class="kpi-plan-multiple" id="kpi-roi">–</p>
         <p class="kpi-sub kpi-plan-sub" id="kpi-roi-sub">&nbsp;</p>
+        <p class="kpi-sub kpi-plan-split" id="kpi-roi-split" hidden></p>
       </article>
       <article class="kpi">
         <h2 class="kpi-label">Avg $ / 1M Tokens</h2>
@@ -263,6 +264,12 @@
         </div>
         <input type="search" id="pricing-search" class="search" placeholder="Search models"
                aria-label="Search models" autocomplete="off" spellcheck="false">
+        <label class="switch" id="pricing-used-switch"
+               title="Show only models your ledger has used. Turn off to list every built-in price.">
+          <input type="checkbox" id="pricing-used" role="switch" checked>
+          <span class="switch-track" aria-hidden="true"></span>
+          <span>Used only</span>
+        </label>
         <button type="button" class="btn btn-primary" id="pricing-add">+ Add Model</button>
       </div>
       <div class="pricing-scroll">

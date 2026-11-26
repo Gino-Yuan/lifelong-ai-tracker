@@ -1,6 +1,6 @@
 # Lifelong AI Tracker
 
-A local, offline ledger of AI coding-tool token usage. It is built on Python 3.11+ and SQLite. **Phase 1**: the storage layer, `pricing.json`, `ClaudeCodeCollector`, analytics, and the CLI. **Phase 2**: a read-only local web dashboard and CSV / JSON export. **Phase 3**: multi-source `sync-all`, a launchd job generator, online backups, and a shareable SVG report card.
+A local, offline ledger of AI coding-tool token usage. It is built on Python 3.11+ and SQLite. **Phase 1**: the storage layer, `pricing.json`, `ClaudeCodeCollector`, analytics, and the CLI. **Phase 2**: a read-only local web dashboard and CSV / JSON export. **Phase 3**: multi-source `sync-all`, a nightly job generator (launchd on macOS, systemd / cron on Linux, Task Scheduler on Windows), online backups, and a shareable SVG report card.
 
 - It reads only the directory you pass to `--source` (for OpenCode and Codex, the SQLite file or the folder that holds it). There is no default scan location.
 - It stores metadata only: timestamp, tool, model, project basename, session/request/message IDs, and the five token counts. Conversation text is never stored.
@@ -14,7 +14,7 @@ sources.example.json             template for sources.json (git-ignored) used by
 subscriptions.example.json       template for subscriptions.json (git-ignored): dated plan periods per tool
 pyproject.toml                   deps: typer, rich (+ pytest for dev); console script `tracker`
 data/tracker.db                  the ledger (created on first sync, git-ignored)
-backups/ logs/ deploy/*.plist    backups, launchd log, generated job file (all git-ignored)
+backups/ logs/ deploy/           backups, scheduler log, generated job files (all git-ignored)
 src/lifelong_tracker/
   config.py                      workspace-anchored default paths
   models.py                      UsageEvent, FileState, UTC timestamp helpers
@@ -32,7 +32,7 @@ src/lifelong_tracker/
   sync.py                        collector -> storage, one transaction per file
   sources.py                     sources.json loader + fault-tolerant sync_all
   backup.py                      sqlite3 backup() API, integrity check, --keep rotation
-  schedule.py                    launchd plist via plistlib + install commands (text only)
+  schedule.py                    launchd plist / systemd unit + timer / crontab line / PowerShell task scripts + install commands (text only)
   card.py                        pure-Python SVG report card (no paths / project names)
   analytics.py                   totals, ratios, ranges, breakdowns, 24h, streaks, unpriced, cache savings, records
   cli.py                         `tracker sync | sync-all | stats | reprice | serve | card | backup | schedule render | collectors`
@@ -48,7 +48,7 @@ tests/
   fixtures/js/stub_dom.js        shared JavaScriptCore stub DOM (fetch is routed to the scenario)
   fixtures/js/pricing_smoke.js   click-through of the Model Pricing modal
   fixtures/js/features_smoke.js  KPIs, records, group switch, shortcuts, Sync Now, Subscriptions tab
-  test_*.py                      1044 tests (77 Phase 1 + 68 web + 40 Phase 3 + 24 Antigravity + 221 filters / pricing + 61 trend + 56 OpenCode + 57 Codex + 43 pricing table + 114 enhancements + 93 subscription periods + 26 Codex thread totals / estimates + 164 custom ranges / period-over-period)
+  test_*.py                      1112 tests (77 Phase 1 + 68 web + 40 Phase 3 + 24 Antigravity + 221 filters / pricing + 61 trend + 56 OpenCode + 57 Codex + 43 pricing table + 114 enhancements + 93 subscription periods + 26 Codex thread totals / estimates + 164 custom ranges / period-over-period + 68 cross-platform schedules / API billing / dated prices)
 ```
 
 ## Key semantics
@@ -68,6 +68,7 @@ Replays of the same message in a resumed session's file collapse into the existi
 - The ledger is lifelong: rows are never deleted when a source log is rotated away.
 
 **Cost.** `events.cost_usd` = tokens × `pricing.json` price. It is NULL for unpriced models.
+- **Dated prices.** A model entry is either one price object (valid for every date) or a list of segments with `effective_from`, e.g. `"claude-x": [{"effective_from": "2026-01-01", "input": 2.0, ...}, {"effective_from": "2026-12-01", "input": 4.0, ...}]`. Each event is priced by the segment in force on its **UTC date** (the latest `effective_from` on or before it); the first segment also covers earlier days and may omit `effective_from`. Dates must be real and strictly increasing. Lookups without a date (the price table, Set Price) use the latest segment. Ingest, `reprice`, the drift check and Cache Saved all follow the dates. Editing a dated model in the dashboard changes only its latest segment and keeps the history.
 - `tracker reprice` (or **Set Price** in the dashboard) rewrites only `cost_usd`. Raw tokens are never touched.
 - Model matching: exact name, then longest prefix at a segment boundary (date suffixes), then the same with one reasoning-tier suffix stripped (`-xhigh`, `-high`, `-medium`, `-low`, `-tiered-high`, `-tiered-low`). So one `gemini-4-neon` entry prices `gemini-4-neon-low/-high/-xhigh`. An explicit variant entry always wins, and a different version number never matches (`gemini-5-neon-high`, `gemini-4-5-high` and `claude-opus-4-9-high` stay unpriced).
 - `stats` warns when stored costs drift from `pricing.json`.
@@ -93,7 +94,7 @@ Replays of the same message in a resumed session's file collapse into the existi
 .venv/bin/tracker sync-all --config sources.json [--db PATH] [--quiet] [--backup-dir backups --keep 14]
 .venv/bin/tracker backup [--db PATH] [--out-dir backups] [--keep 14]
 .venv/bin/tracker card [--range lifelong|ytd|90d|30d|7d|today] [--out report.svg]
-.venv/bin/tracker schedule render --config sources.json [--out deploy/com.lifelong-tracker.sync.plist] [--hour 23 --minute 30] [--no-backup]
+.venv/bin/tracker schedule render --config sources.json [--platform macos|linux|windows] [--out deploy/<label>.plist|.service|.ps1] [--hour 23 --minute 30] [--no-backup]
 .venv/bin/python -m pytest
 ```
 
@@ -111,14 +112,14 @@ Replays of the same message in a resumed session's file collapse into the existi
 | Endpoint | Parameters |
 |---|---|
 | `GET /api/tools` | tools that have data, in registry order (`claude-code`, `antigravity`, ...) with labels and totals |
-| `GET /api/overview` | `range=today\|7d\|30d\|90d\|ytd\|last_year\|lifelong\|custom` - KPIs, five categories, streak, unpriced models (+ `base_model`), reprice alert, `cache_savings`, `records`, `subscription` (ROI or null), `subscription_error` and `comparison` (see below) |
+| `GET /api/overview` | `range=today\|7d\|30d\|90d\|ytd\|last_year\|lifelong\|custom` - KPIs, five categories, streak, unpriced models (+ `base_model`), reprice alert, `cache_savings`, `records`, `subscription` (ROI or null, with `api_direct_spend_usd`), `subscription_error`, `billing` (API vs subscription split, or null) and `comparison` (see below) |
 | `GET /api/timeseries` | `range`, `granularity=auto\|day\|week\|month`, `split_by=none\|tool` - `days` (daily, unchanged), `points` (zero-filled calendar buckets: day, Monday-start ISO week, or month; `auto` = daily ≤ 120 days, weekly ≤ 2 years, else monthly), and with `split_by=tool` a `series` list (one per agent active in scope, identical bucket axis, sums to `points`) |
 | `GET /api/breakdown` | `by=model\|tool\|project`, `range`, `limit`, `group_variants=false\|true` - ranking with token / cost share. With `by=model&group_variants=true` rows are model families (tier and date suffixes stripped) with `variants` / `variant_count`; the limit applies after merging. Ignored for other `by` values |
 | `GET /api/heatmap` | `year` - every day of the year (local time) |
 | `GET /api/hourly` | `range` - 24 local-hour buckets |
 | `GET /api/export` | `format=csv\|json`, `range` - per-event metadata rows as a download |
 | `GET /api/card` | `range`, `download=1` - the SVG report card (`image/svg+xml`) |
-| `GET /api/pricing` | the current price table: `currency`, `unit` (`per_million_tokens`), `unit_label`, `updated` (`_meta.updated`, else the file's date), `count`, `providers` (Claude / Gemini / GPT / Other with counts) and `models` (`model, provider, input, output, thinking, cache_read, cache_write`), grouped by provider then by name (digit runs compare as numbers). Read-only; no file paths |
+| `GET /api/pricing` | the current price table: `currency`, `unit` (`per_million_tokens`), `unit_label`, `updated` (`_meta.updated`, else the file's date), `count`, `used_count`, `providers` (Claude / Gemini / GPT / Other with counts) and `models` (`model, provider, input, output, thinking, cache_read, cache_write` at the latest price, `used` = the ledger has events priced by this row (tier variants count for their base row), `effective_from` of that price or null, and `history` = the older dated prices), grouped by provider then by name (digit runs compare as numbers). Read-only; no file paths |
 | `POST /api/pricing` | JSON `{model, input, output, thinking?, cache_read, cache_write}` (USD / 1M, each ≥ 0) - saves to `pricing.json` and reprices. Unknown fields, negative or non-numeric values, and bad names return 422 |
 | `GET /api/subscriptions` | per registered tool: `periods` (`start`, `end` or null, `monthly_usd`, `ongoing`), `legacy` (an undated number), `monthly_usd` in force today; plus `today`, `writable`, `configured`, `error` (a broken file), `days_per_month`, `max_monthly_usd`, `max_periods`. Read-only |
 | `POST /api/subscriptions` | JSON `{subscriptions: {tool: [{start, end, monthly_usd}, ...] \| USD}}` - known tool ids only, `start` `YYYY-MM-DD`, `end` `YYYY-MM-DD` ≥ start or null (ongoing), fee 0 to 10,000, at most 48 periods per tool, no overlapping periods within a tool. The legacy `{fees: {tool: USD}}` body is still accepted. Replaces `subscriptions.json` atomically (top-level `_` keys are kept). 422 on bad values, 503 when the server has no subscriptions path |
@@ -156,13 +157,14 @@ Replays of the same message in a resumed session's file collapse into the existi
 - **Custom** (right of `Lifelong`, key `8`) shows compact `Start` / `End` date inputs and **Apply**. It starts with the last 30 days (or the custom window applied before) and loads at once; edit the dates and press **Apply** or Enter to reload every panel. An end before the start or an impossible date is refused in place. The hash keeps the window, e.g. `#range=custom&start=2026-10-01&end=2026-10-31`; a hash with a bad window falls back to the last 30 days.
 - Unpriced models get a **Set Price** button, both in the warning banner and next to the `unpriced` badge.
 - In the price dialog, *Apply to base model* (on by default for tiered names) saves one price for the base model (`gemini-4-neon`) instead of a single variant.
-- **Pricing** (top bar, next to the exports) opens the *Model Pricing* table: `USD per 1M tokens`, the last-updated date, `All | Claude | Gemini | GPT` filters (with counts; `Other` appears when needed), a live search box, and **+ Add Model**. Columns are `Model | Input | Output | Thinking | Cache Read | Cache Write | Action`, in tabular figures; the *All* view is grouped by provider.
+- **Pricing** (top bar, next to the exports) opens the *Model Pricing* table: `USD per 1M tokens`, the last-updated date, `All | Claude | Gemini | GPT` filters (with counts; `Other` appears when needed), a live search box, a **Used only** switch (on by default: only the models your ledger has used; turn it off to see every built-in price; a model you just added stays listed until the dialog closes) and **+ Add Model**. A model with dated prices shows `since Dec 1, 2026 · 2 price periods` under its name and the older prices on hover. Columns are `Model | Input | Output | Thinking | Cache Read | Cache Write | Action`, in tabular figures; the *All* view is grouped by provider.
 - A row's **Edit** opens the same price dialog prefilled with that model's current price. **Save & Reprice** writes `pricing.json` atomically, reprices the ledger, then refreshes the table (the edited row is highlighted) and the dashboard. **+ Add Model** opens it with an editable model name.
 - `Esc` or the backdrop closes the topmost dialog (the price dialog first, then the table).
 
 **Savings, plans, records and shortcuts.**
 - **Cache Saved** KPI: `sum(cache_read_tokens / 1M * max(0, input rate - cache-read rate))` over priced events in scope, using the current `pricing.json` (a Set Price edit shows immediately). Cache reads of unpriced models are counted separately.
 - **Subscription ROI**: record plan periods in *Pricing → Subscriptions* (or copy `subscriptions.example.json` to `subscriptions.json`). Each tool has a list of non-overlapping periods `{start, end, monthly_usd}`; an empty / null `end` means the plan is still running (counted up to today), so cancellations, different start days and mid-way up- or downgrades are all just periods. For every paid period the overlap with the range (inclusive days, never past today) costs `overlap_days / 30.436875 × monthly_usd`, and only the API-equivalent value of those same days counts, so days after a plan ends add neither cost nor value. The **Plan Spent & ROI** card leads with what the plans actually cost in the range, in full (e.g. `$142.50 spent`, never cut off), then the multiple (`17.4× value`), then `$2,484.12 API value · Saved $2,341.62 · 30 days` (*Net loss* when the value is below the plan cost). It follows the range and tool filters. If paid plans exist but none overlaps the range it shows `–` and *No paid plan in this range*. *Lifelong* starts at the earliest of the paid tools' first active day and their earliest plan start. The tool filter applies; the model filter does not (a plan pays for the whole tool). Old files with a plain number per tool (`"claude-code": 20.0`) still load as an undated plan that counts every day.
+- **API vs subscription billing**: mark a source in `sources.json` with `"billing": "api"` when it runs on a pay-as-you-go API key (the default `"subscription"` keeps the old behaviour). Events are attributed to a source by the log file they were read from (the source whose folder is the longest prefix of that file's path, so a nested source overrides its parent; files no source claims count as subscription usage). API-billed usage is real spend, so it is left out of the plan value and the ROI multiple and summed separately: `/api/overview` returns `billing` (`api_direct_spend_usd`, `api_events`, `api_unpriced_events`, `api_tokens`, `subscription_value_usd`, per-tool `tools`) and `subscription.api_direct_spend_usd` / per-tool `api_spend_usd`. When any API source exists the **Plan Spent & ROI** card adds `Subscription: $Y · Direct API: $X`, and the tooltip explains both and the total out of pocket (plans + API). With API sources but no plan the card shows the direct API spend and *Pay as you go*. Like the plans, it follows the range and tool filters, not the model filter. Total Cost and the other KPIs still include all usage.
 - **Privacy**: subscription dates and fees appear only in the dashboard and `/api/subscriptions` / `/api/overview`. The SVG card and the CSV / JSON usage export never include them.
 - **Personal Records** row: peak day (most tokens, with its cost; ties go to the earliest day), heaviest session (tool, day, tokens and cost only - never an id, path or project) and longest streak with its dates. All three follow the range, tool and model filters.
 - **Group variants** switch on the Breakdown card (Model tab only): merges `-low / -high / dated` releases into one family row with a `×n` badge; family rows do not focus the dashboard. On by default; turning it off is kept in the hash as `group=0`.
@@ -175,17 +177,19 @@ Replays of the same message in a resumed session's file collapse into the existi
 - `~` is expanded. Relative paths resolve against the config file's folder. Unknown keys are rejected, so a typo cannot silently change behaviour.
 - A missing path, a placeholder collector, or a crash while parsing marks only that source as failed; the rest still sync.
 - Exit code: 0 when every enabled source (and the backup, if requested) succeeded, 1 when anything failed, 2 for a config or pricing error.
-- `--quiet` prints one timestamped summary line plus one line per failure, for the launchd log.
+- `--quiet` prints one timestamped summary line plus one line per failure, for the scheduler log.
+- Optional `"billing": "subscription" | "api"` per source (see *API vs subscription billing* above).
 
 **`backup`** uses `sqlite3.Connection.backup()` on a read-only connection, so it is safe while a sync is writing.
 - The copy is verified with `PRAGMA integrity_check` and switched to a single-file journal, so no `-wal` / `-shm` files sit beside it. It is then renamed to `tracker-YYYYMMDD-HHMMSS.db`.
 - `--keep N` deletes all but the newest N files that match that name. Other files in the folder are never touched.
 
-**`schedule render`** writes a LaunchAgent plist with `plistlib` and prints the `cp` / `launchctl` commands for you to run yourself.
-- Every path in the plist is absolute. stdout and stderr go to `logs/sync.log`.
-- By default the job runs `sync-all --quiet --backup-dir backups --keep 14`.
-- The tool never runs `launchctl` and never writes to `~/Library`.
-- If the project is under `~/Documents` (or Desktop / Downloads), macOS privacy protection may block the background job. The command prints how to grant access.
+**`schedule render`** writes the nightly job for this computer's scheduler (or `--platform macos|linux|windows`) and prints the commands for you to run yourself. It only writes inside the project (`deploy/` by default) and never runs `launchctl`, `systemctl`, `crontab` or PowerShell, nor writes to `~/Library`, `~/.config` or the Task Scheduler.
+- **macos**: a LaunchAgent plist (`plistlib`) plus `cp` / `launchctl bootstrap` / `bootout` commands. If the project is under `~/Documents` (or Desktop / Downloads), macOS privacy protection may block the background job; the command prints how to grant access.
+- **linux**: a `systemd --user` pair, `<label>.service` (`Type=oneshot`, low priority) and `<label>.timer` (`OnCalendar=*-*-* HH:MM:00`, `Persistent=true` to catch up after downtime), plus `<label>.crontab` with the equivalent cron line (tagged `# lifelong-tracker:<label>` so the printed uninstall command removes exactly that line). Use either one. Arguments are quoted for systemd (`%` → `%%`, `$` → `$$`) and for the shell (`%` → `\%` in cron).
+- **windows**: `<label>.ps1` registers a per-user Task Scheduler task (daily trigger, start when available, no overlap) that runs `tracker.exe sync-all` through `cmd.exe` and appends to the log; `<label>.uninstall.ps1` removes it. Both are UTF-8 with BOM and CRLF so Windows PowerShell 5.1 reads non-ASCII paths correctly. The default executable is `.venv\Scripts\tracker.exe`. Paths containing `"` or `%` are refused (cmd.exe would expand them).
+- Every path is absolute. stdout and stderr go to `logs/sync.log`. By default the job runs `sync-all --quiet --backup-dir backups --keep 14`.
+- **Tests on any OS**: the JavaScriptCore browser tests run where a `jsc` shell exists (built into macOS) and are skipped elsewhere, and the timezone pin works without `time.tzset`, so the suite passes on Linux and Windows CI too.
 
 **`card`** and **`GET /api/card`** produce a 1200×630 dark SVG card. It shows totals, the token mix, cache hit %, the top 3 models, the longest streak, and a fun equivalence (~10 tokens per line of code, ~120K tokens per novel).
 - The card is built only from aggregates and model names. It never queries project names, IDs, or paths.

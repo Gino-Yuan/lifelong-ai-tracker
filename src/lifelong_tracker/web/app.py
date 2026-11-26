@@ -54,6 +54,8 @@ from lifelong_tracker.subscriptions import (
     MAX_MONTHLY_USD,
     MAX_PERIODS,
     SubscriptionsError,
+    api_spend,
+    billing_rules,
     fee_on,
     load_subscriptions,
     save_subscriptions,
@@ -189,6 +191,23 @@ def _comparison_dict(cmp: Optional["analytics.Comparison"]) -> Optional[dict]:
 
 
 # --------------------------------------------------------------------------- pricing
+
+def _price_row(provider: str, key: str, price, segments, used: bool) -> dict:
+    """One /api/pricing row: the latest price, when it took effect and the older prices."""
+    latest = segments[-1].effective_from
+    return {
+        "model": key,
+        "provider": provider,
+        **{f: getattr(price, f) for f in CATEGORY_KEYS},
+        "used": used,
+        "effective_from": None if latest is None else latest.isoformat(),
+        "history": [
+            {"effective_from": None if s.effective_from is None else s.effective_from.isoformat(),
+             **{f: getattr(s.price, f) for f in CATEGORY_KEYS}}
+            for s in segments[:-1]
+        ],
+    }
+
 
 class _PricingCache:
     """Reload pricing.json whenever its mtime changes (edits show up without restart)."""
@@ -380,6 +399,15 @@ def create_app(
         except SubscriptionsError as exc:
             return {}, str(exc)
 
+    def read_sources() -> tuple[list, Optional[str]]:
+        """sources.json specs (for their `billing` mode); none when absent or invalid."""
+        if sources_path is None or not Path(sources_path).is_file():
+            return [], None
+        try:
+            return sources_mod.load_sources(sources_path), None
+        except sources_mod.SourcesConfigError as exc:
+            return [], str(exc)
+
     @app.exception_handler(RequestValidationError)
     async def validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
         # Never echo submitted values back (they may be NaN / Infinity, which are not
@@ -453,9 +481,13 @@ def create_app(
         saved = analytics.cache_savings(conn, pricing, range_name, d, **scope.kw)
         recs = analytics.records(conn, range_name, d, **scope.kw)
         fees, fees_error = read_fees()
-        roi = subscription_roi(conn, fees, range_name, d, tool=scope.tool) if fees else None
+        specs, _sources_error = read_sources()
+        roi = (subscription_roi(conn, fees, range_name, d, tool=scope.tool, sources=specs)
+               if fees else None)
         drift = pricing_drift(conn, pricing)
         start, end = analytics.range_bounds(range_name, d)
+        rules = billing_rules(specs)
+        direct = api_spend(conn, rules, start, end, tool=scope.tool) if rules else None
         cmp = analytics.comparison(conn, range_name, d, current=tot, **scope.kw)
         messages = []
         if unpriced:
@@ -517,15 +549,32 @@ def create_app(
                 "value_usd": roi.value_usd,
                 "multiple": roi.multiple,
                 "unpriced_events": roi.unpriced_events,
+                "api_direct_spend_usd": roi.api_direct_spend_usd,
                 "basis": "tool",  # the model filter does not apply to plans
                 "tools": [
                     {"tool": v.tool, "label": tool_label(v.tool), "monthly_usd": v.monthly_usd,
                      "paid_days": v.paid_days, "plan_cost_usd": v.plan_cost_usd,
-                     "value_usd": v.value_usd, "unpriced_events": v.unpriced_events}
+                     "value_usd": v.value_usd, "unpriced_events": v.unpriced_events,
+                     "api_spend_usd": v.api_spend_usd}
                     for v in roi.tools
                 ],
             },
             "subscription_error": fees_error,
+            # pay-as-you-go usage from sources marked "billing": "api"; null when none is
+            "billing": None if direct is None else {
+                "api_sources": sum(1 for s in specs if s.billing == "api"),
+                "api_direct_spend_usd": direct.usd,
+                "api_events": direct.events,
+                "api_unpriced_events": direct.unpriced_events,
+                "api_tokens": direct.tokens,
+                "subscription_value_usd": None if roi is None else roi.value_usd,
+                "basis": "tool",
+                "tools": [
+                    {"tool": t.tool, "label": tool_label(t.tool), "api_spend_usd": t.usd,
+                     "events": t.events, "unpriced_events": t.unpriced_events, "tokens": t.tokens}
+                    for t in direct.tools
+                ],
+            },
             "alerts": {
                 "needs_pricing": bool(unpriced),
                 "needs_reprice": bool(drift),
@@ -711,8 +760,14 @@ def create_app(
         )
 
     @app.get("/api/pricing")
-    def pricing_list() -> dict:
+    def pricing_list(conn: Conn) -> dict:
         table = pricing_cache.get()
+        # price rows the ledger actually uses (a '-high' variant counts for its base row)
+        used_keys = set()
+        for (model,) in conn.execute("SELECT DISTINCT model FROM events"):
+            hit = table.lookup(model)
+            if hit is not None:
+                used_keys.add(hit[0])
         meta = pricing_cache.meta()
         updated = meta.get("updated")
         if not (isinstance(updated, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", updated)):
@@ -731,15 +786,10 @@ def create_app(
             "unit_label": f"{currency} per 1M tokens",
             "updated": updated,
             "count": len(entries),
+            "used_count": sum(1 for _, key, _ in entries if key in used_keys),
             "providers": [{"provider": p, "count": counts[p]} for p in PROVIDERS],
-            "models": [
-                {
-                    "model": key,
-                    "provider": provider,
-                    **{f: getattr(price, f) for f in CATEGORY_KEYS},
-                }
-                for provider, key, price in entries
-            ],
+            "models": [_price_row(provider, key, price, table.segments(key), key in used_keys)
+                       for provider, key, price in entries],
         }
 
     @app.post("/api/pricing")

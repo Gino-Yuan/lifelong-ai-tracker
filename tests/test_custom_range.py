@@ -32,7 +32,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import FIXTURES, TEST_PRICING
+from conftest import FIXTURES, TEST_PRICING, JSC, requires_jsc
 from lifelong_tracker import analytics
 from lifelong_tracker.analytics import CustomRange, previous_period
 from lifelong_tracker.card import build_card_data
@@ -45,7 +45,6 @@ from lifelong_tracker.web.app import STATIC_DIR, create_app
 
 TODAY = date(2026, 11, 26)
 BASE = "http://127.0.0.1:8765"
-JSC = Path("/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc")
 JS = FIXTURES / "js"
 HAIKU, SONNET = "claude-haiku-4-5", "claude-sonnet-4-5"
 OCT = {"range": "custom", "start": "2026-10-01", "end": "2026-10-31"}
@@ -540,7 +539,7 @@ def _run_jsc(*args: str) -> list[str]:
     return [ln for ln in lines if ln.startswith("PASS")]
 
 
-@pytest.mark.skipif(not JSC.exists(), reason="macOS JavaScriptCore not available")
+@requires_jsc
 def test_custom_range_and_deltas_runtime_jsc(recorded_ranges):
     passed = _run_jsc(str(recorded_ranges), "main")
     assert len(passed) >= 60, len(passed)
@@ -552,14 +551,14 @@ def test_custom_range_and_deltas_runtime_jsc(recorded_ranges):
         assert any(ln.startswith("PASS " + name) for ln in passed), name
 
 
-@pytest.mark.skipif(not JSC.exists(), reason="macOS JavaScriptCore not available")
+@requires_jsc
 def test_custom_range_defaults_jsc(recorded_ranges):
     passed = _run_jsc(str(recorded_ranges), "fresh")
     assert any(ln.startswith("PASS Custom prefills the last 30 days ending on the server's today") for ln in passed)
     assert any(ln.startswith("PASS cost badge for custom|2026-10-28|2026-11-26|") for ln in passed)
 
 
-@pytest.mark.skipif(not JSC.exists(), reason="macOS JavaScriptCore not available")
+@requires_jsc
 @pytest.mark.parametrize("mode", ["badhash", "reversedhash"])
 def test_custom_range_bad_hash_falls_back_jsc(recorded_ranges, mode):
     passed = _run_jsc(str(recorded_ranges), mode)

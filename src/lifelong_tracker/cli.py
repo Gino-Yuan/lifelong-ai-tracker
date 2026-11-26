@@ -488,7 +488,15 @@ _LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 @schedule_app.command("render")
 def schedule_render(
     config: Path = ConfigOpt,
-    out: Path = typer.Option(DEFAULT_PLIST_PATH, "--out", "-o", dir_okay=False, help="plist file to write."),
+    platform: Optional[str] = typer.Option(
+        None, "--platform", case_sensitive=False,
+        help="macos (launchd plist), linux (systemd --user timer + crontab line) or windows "
+             "(PowerShell Task Scheduler scripts). Default: this computer's platform.",
+    ),
+    out: Optional[Path] = typer.Option(
+        None, "--out", "-o", dir_okay=False,
+        help="Main file to write (default: deploy/<label>.plist | .service | .ps1).",
+    ),
     hour: int = typer.Option(23, "--hour", min=0, max=23, help="Local hour to run (0-23)."),
     minute: int = typer.Option(30, "--minute", min=0, max=59, help="Minute (0-59)."),
     db: Path = DbOpt,
@@ -497,18 +505,22 @@ def schedule_render(
     keep: int = KeepOpt,
     no_backup: bool = typer.Option(False, "--no-backup", help="Do not back up after each sync."),
     log_file: Path = typer.Option(DEFAULT_LOG_PATH, "--log-file", dir_okay=False, help="stdout/stderr log."),
-    label: str = typer.Option("com.lifelong-tracker.sync", "--label", help="launchd job label."),
-    tracker_bin: Path = typer.Option(DEFAULT_TRACKER_BIN, "--tracker-bin", dir_okay=False, help="tracker executable."),
+    label: str = typer.Option("com.lifelong-tracker.sync", "--label",
+                              help="Job label (launchd label / systemd unit / Windows task name)."),
+    tracker_bin: Optional[Path] = typer.Option(
+        None, "--tracker-bin", dir_okay=False,
+        help="tracker executable (default: the project's .venv entry point for the platform).",
+    ),
 ) -> None:
-    """Write a launchd LaunchAgent plist and print the commands to install it yourself."""
-    from lifelong_tracker.schedule import (
-        ScheduleSpec,
-        install_commands,
-        is_privacy_protected,
-        render_plist,
-    )
+    """Write the nightly sync-all job for launchd, systemd/cron or Task Scheduler, and print
+    the commands to install it yourself (nothing is installed)."""
+    from lifelong_tracker import schedule as sched
     from lifelong_tracker.sources import SourcesConfigError, load_sources
 
+    target = (platform or sched.detect_platform()).lower()
+    if target not in sched.PLATFORMS:
+        console.print(f"[red]--platform must be one of: {', '.join(sched.PLATFORMS)}.[/red]")
+        raise typer.Exit(2)
     if not _LABEL_RE.match(label):
         console.print("[red]--label may contain only letters, digits, '.', '_' and '-'.[/red]")
         raise typer.Exit(2)
@@ -519,7 +531,12 @@ def schedule_render(
         raise typer.Exit(2) from exc
 
     project_root = PROJECT_ROOT
-    spec = ScheduleSpec(
+    if tracker_bin is None:
+        tracker_bin = (DEFAULT_TRACKER_BIN if target != "windows"
+                       else sched.default_tracker_bin(project_root, target))
+    if out is None:
+        out = sched.default_out(DEFAULT_PLIST_PATH.parent, label, target)
+    spec = sched.ScheduleSpec(
         label=label,
         tracker_bin=Path(tracker_bin).absolute(),
         project_root=project_root,
@@ -532,15 +549,25 @@ def schedule_render(
         backup_dir=None if no_backup else Path(backup_dir).resolve(),
         keep=keep,
     )
-    data = render_plist(spec)
-    plistlib.loads(data)  # round-trip sanity check
     out = Path(out).resolve()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_bytes(data)
-    spec.log_file.parent.mkdir(parents=True, exist_ok=True)  # launchd will not create it
+    try:
+        files = sched.render(spec, target, out)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]", soft_wrap=True, highlight=False)
+        raise typer.Exit(2) from exc
+    if target == "macos":
+        plistlib.loads(files[0][1])  # round-trip sanity check
+    for path, data in files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    spec.log_file.parent.mkdir(parents=True, exist_ok=True)  # schedulers do not create it
 
     enabled = sum(1 for s in specs if s.enabled)
-    console.print(f"[green]Wrote[/green] {out}", soft_wrap=True, highlight=False)
+    scheduler = {"macos": "launchd", "linux": "systemd --user / cron",
+                 "windows": "Windows Task Scheduler"}[target]
+    console.print(f"Platform: [bold]{target}[/bold] ({scheduler})", highlight=False)
+    for path, _ in files:
+        console.print(f"[green]Wrote[/green] {path}", soft_wrap=True, highlight=False)
     console.print(
         f"Job [bold]{label}[/bold] runs `sync-all` daily at {hour:02d}:{minute:02d} (local time) "
         f"for {enabled} enabled source(s)"
@@ -552,16 +579,20 @@ def schedule_render(
         console.print(f"[yellow]Warning: {spec.tracker_bin} does not exist yet.[/yellow]", soft_wrap=True)
     if enabled == 0:
         console.print("[yellow]Warning: the config has no enabled sources.[/yellow]")
-    if out.name != f"{label}.plist":
+    if target == "macos" and out.name != f"{label}.plist":
         console.print(f"[yellow]Note: launchd convention is to name the file {label}.plist.[/yellow]")
 
-    console.print("\n[bold]Run these yourself in Terminal (nothing has been installed):[/bold]")
-    for section, cmds in install_commands(out, label, spec.log_file).items():
-        console.print(f"\n[bold cyan]# {section}[/bold cyan]")
+    shell = "PowerShell" if target == "windows" else "Terminal"
+    console.print(f"\n[bold]Run these yourself in {shell} (nothing has been installed):[/bold]")
+    for section, cmds in sched.commands_for(target, [p for p, _ in files], spec).items():
+        console.print(f"\n[bold cyan]# {section}[/bold cyan]", highlight=False)
         for cmd in cmds:
             console.print(cmd, markup=False, highlight=False, soft_wrap=True)
+    if target == "linux":
+        console.print("\nTo run while you are logged out: loginctl enable-linger $USER",
+                      markup=False, highlight=False)
 
-    if is_privacy_protected(project_root, Path.home()):
+    if target == "macos" and sched.is_privacy_protected(project_root, Path.home()):
         console.print(
             "\n[yellow]macOS privacy note: this project is inside a protected folder "
             "(Documents/Desktop/Downloads). Background jobs may be denied access there. If the "

@@ -23,7 +23,7 @@ import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from conftest import CLAUDE_FIXTURES, FIXTURES, TEST_PRICING
+from conftest import CLAUDE_FIXTURES, FIXTURES, TEST_PRICING, JSC, requires_jsc
 from lifelong_tracker import analytics, cli
 from lifelong_tracker import sources as sources_mod
 from lifelong_tracker.config import DEFAULT_SUBSCRIPTIONS_PATH, PROJECT_ROOT
@@ -45,7 +45,6 @@ from lifelong_tracker.web.app import STATIC_DIR, create_app
 
 TODAY = date(2026, 11, 26)
 BASE = "http://127.0.0.1:8765"
-JSC = Path("/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc")
 JS = FIXTURES / "js"
 EXTRA_PRICES = {
     "gemini-4-neon": {"input": 3.0, "output": 15.0, "thinking": 15.0, "cache_read": 0.3, "cache_write": 0.0},
@@ -410,7 +409,9 @@ def test_post_subscriptions_saves_and_drives_roi(db, pricing_path, tmp_path, roi
     assert sub["value_usd"] == pytest.approx(18.0) and sub["multiple"] == pytest.approx(18.0 / sub["plan_cost_usd"])
     assert sub["tools"] == [{"tool": "claude-code", "label": "Claude Code", "monthly_usd": 20.0,
                              "paid_days": 30, "plan_cost_usd": pytest.approx(sub["plan_cost_usd"]),
-                             "value_usd": pytest.approx(18.0), "unpriced_events": 1}]
+                             "value_usd": pytest.approx(18.0), "unpriced_events": 1,
+                             "api_spend_usd": 0.0}]
+    assert sub["api_direct_spend_usd"] == 0.0 and ov["billing"] is None  # no API-billed source
     assert (sub["start"], sub["end"]) == ("2026-10-28", "2026-11-26")
     # the model filter does not apply to a plan; the tool filter does
     assert c.get("/api/overview", params={"range": "30d", "model": "claude-opus-4"}).json()["subscription"] == sub
@@ -1118,18 +1119,18 @@ def _run_jsc(scenario: Path, *args: Path) -> list[str]:
     return lines
 
 
-@pytest.mark.skipif(not JSC.exists(), reason="macOS JavaScriptCore not available")
+@requires_jsc
 def test_app_js_syntax_jsc():
     script = 'try { new Function(readFile(arguments[0])); print("SYNTAX_OK"); } catch (e) { print("SYNTAX_ERROR " + e); }'
     for f in ("app.js",):
         out = subprocess.run([str(JSC), "-e", script, "--", str(STATIC_DIR / f)], capture_output=True, text=True, timeout=60)
         assert out.stdout.strip() == "SYNTAX_OK", out.stdout + out.stderr
-    for f in ("stub_dom.js", "pricing_smoke.js", "features_smoke.js", "range_smoke.js"):
+    for f in ("stub_dom.js", "pricing_smoke.js", "features_smoke.js", "range_smoke.js", "billing_smoke.js"):
         out = subprocess.run([str(JSC), "-e", script, "--", str(JS / f)], capture_output=True, text=True, timeout=60)
         assert out.stdout.strip() == "SYNTAX_OK", f + out.stdout + out.stderr
 
 
-@pytest.mark.skipif(not JSC.exists(), reason="macOS JavaScriptCore not available")
+@requires_jsc
 def test_features_runtime_jsc(recorded):
     """The real app.js against recorded API responses: KPIs, records, group switch, keys, Sync Now, plans."""
     lines = _run_jsc(JS / "features_smoke.js", recorded)

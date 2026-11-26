@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import FIXTURES, TEST_PRICING
+from conftest import FIXTURES, TEST_PRICING, JSC, requires_jsc
 from lifelong_tracker.collectors import AntigravityCollector, ClaudeCodeCollector
 from lifelong_tracker.pricing import PROVIDERS, PricingTable, provider_of, set_model_price
 from lifelong_tracker.storage import connect
@@ -29,7 +29,6 @@ from lifelong_tracker.web.app import STATIC_DIR, create_app
 
 TODAY = date(2026, 11, 26)
 BASE = "http://127.0.0.1:8765"
-JSC = Path("/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc")
 SMOKE = FIXTURES / "js" / "pricing_smoke.js"
 STUB_DOM = FIXTURES / "js" / "stub_dom.js"
 FIELDS = ("input", "output", "thinking", "cache_read", "cache_write")
@@ -113,7 +112,7 @@ def test_get_pricing_shape(client, pricing_file):
     assert r.status_code == 200
     assert r.headers["cache-control"] == "no-store"
     body = r.json()
-    assert set(body) == {"currency", "unit", "unit_label", "updated", "count", "providers", "models"}
+    assert set(body) == {"currency", "unit", "unit_label", "updated", "count", "used_count", "providers", "models"}
     assert (body["currency"], body["unit"], body["unit_label"]) == ("USD", "per_million_tokens", "USD per 1M tokens")
     assert body["updated"] == "2026-11-01"
     assert body["count"] == len(body["models"]) == 4 + len(EXTRA)
@@ -122,7 +121,8 @@ def test_get_pricing_shape(client, pricing_file):
         {"provider": "GPT", "count": 3}, {"provider": "Other", "count": 1},
     ]
     for m in body["models"]:
-        assert set(m) == {"model", "provider", *FIELDS}
+        assert set(m) == {"model", "provider", *FIELDS, "used", "effective_from", "history"}
+        assert isinstance(m["used"], bool) and m["effective_from"] is None and m["history"] == []
         assert all(isinstance(m[f], float) and m[f] >= 0 for f in FIELDS)
         assert m["provider"] == provider_of(m["model"])
 
@@ -138,7 +138,8 @@ def test_get_pricing_order_and_values(client):
     by = {m["model"]: m for m in models}
     assert by["claude-sonnet-4-5"] == {"model": "claude-sonnet-4-5", "provider": "Claude", "input": 3.0,
                                        "output": 15.0, "thinking": 15.0,  # omitted -> output rate
-                                       "cache_read": 0.3, "cache_write": 3.75}
+                                       "cache_read": 0.3, "cache_write": 3.75,
+                                       "used": True, "effective_from": None, "history": []}
     assert by["gemini-4-neon"]["cache_write"] == 0.0
 
 
@@ -355,7 +356,7 @@ def test_js_wiring():
     assert "fetch(" in JS and "http" not in re.sub(r'"http://www\.w3\.org/2000/svg"', "", JS)
 
 
-@pytest.mark.skipif(not JSC.exists(), reason="macOS JavaScriptCore not available")
+@requires_jsc
 def test_app_js_syntax_jsc():
     script = 'try { new Function(readFile(arguments[0])); print("SYNTAX_OK"); } catch (e) { print("SYNTAX_ERROR " + e); }'
     out = subprocess.run([str(JSC), "-e", script, "--", str(STATIC_DIR / "app.js")],
@@ -363,7 +364,7 @@ def test_app_js_syntax_jsc():
     assert out.stdout.strip() == "SYNTAX_OK", out.stdout + out.stderr
 
 
-@pytest.mark.skipif(not JSC.exists(), reason="macOS JavaScriptCore not available")
+@requires_jsc
 def test_pricing_modal_runtime_jsc(tmp_path):
     """Run the real app.js against a stub DOM + a real /api/pricing response and click through it."""
     p = tmp_path / "pricing.json"

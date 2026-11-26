@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Iterable, Iterator
 
 from lifelong_tracker.models import TOKEN_FIELDS, FileState, UsageEvent, format_utc
-from lifelong_tracker.pricing import PricingTable
+from lifelong_tracker.pricing import PriceWindow, PricingTable
 
 SCHEMA_VERSION = "1"
 
@@ -206,7 +206,7 @@ WHERE excluded.input_tokens       > input_tokens
    OR (model IN ('', 'unknown') AND excluded.model NOT IN ('', 'unknown'))
    OR (project_name = '' AND excluded.project_name <> '')
    OR (session_id   = '' AND excluded.session_id   <> '')
-RETURNING id, model, first_seen_at = updated_at AS is_new,
+RETURNING id, model, timestamp, first_seen_at = updated_at AS is_new,
           input_tokens, output_tokens, thinking_tokens, cache_read_tokens, cache_write_tokens
 """
 
@@ -240,6 +240,7 @@ def upsert_events(
         else:
             result.updated += 1
         cost = pricing.cost_for(row["model"], tool=ev.tool, message_id=ev.message_id,
+                                day=_utc_day(row["timestamp"]),
                                 **{f: row[f] for f in TOKEN_FIELDS})
         conn.execute("UPDATE events SET cost_usd = ? WHERE id = ?", (cost, row["id"]))
     return result
@@ -272,58 +273,98 @@ def _cost_expr() -> str:
     )
 
 
+# An event's UTC date: timestamps are stored as 'YYYY-MM-DDTHH:MM:SS.fffZ' (UTC).
+_UTC_DAY_SQL = "substr(timestamp, 1, 10)"
+
+
+def _utc_day(timestamp: str) -> str:
+    return timestamp[:10]
+
+
+def _window_sql(win: PriceWindow) -> tuple[str, dict[str, str]]:
+    """Extra WHERE terms (leading ' AND ...') limiting rows to one dated price window."""
+    sql, params = "", {}
+    if win.lo is not None:
+        sql += f" AND {_UTC_DAY_SQL} >= :win_lo"
+        params["win_lo"] = win.lo
+    if win.hi is not None:
+        sql += f" AND {_UTC_DAY_SQL} < :win_hi"
+        params["win_hi"] = win.hi
+    return sql, params
+
+
+def _price_params(p) -> dict[str, float]:
+    return {"input": p.input, "output": p.output, "thinking": p.thinking,
+            "cache_read": p.cache_read, "cache_write": p.cache_write,
+            "blended": p.codex_blended_rate}
+
+
 def reprice(conn: sqlite3.Connection, pricing: PricingTable) -> RepriceResult:
     """Recompute events.cost_usd from the current pricing table.
 
-    Only the cost column is written; the five raw token columns are never touched.
+    A model with dated prices is repriced window by window, each event at the
+    price in force on its UTC date. Only the cost column is written; the five raw
+    token columns are never touched.
     """
     res = RepriceResult()
     with transaction(conn):
         res.cost_before = conn.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM events").fetchone()[0]
         models = conn.execute("SELECT model, COUNT(*) AS n FROM events GROUP BY model").fetchall()
         for row in models:
-            hit = pricing.lookup(row["model"])
-            if hit is None:
+            windows = pricing.windows(row["model"])
+            if windows is None:
                 conn.execute("UPDATE events SET cost_usd = NULL WHERE model = ?", (row["model"],))
                 res.models_unpriced += 1
                 res.events_unpriced += row["n"]
-            else:
-                p = hit[1]
+                continue
+            for win in windows:
+                extra, wparams = _window_sql(win)
                 conn.execute(
-                    f"UPDATE events SET cost_usd = {_cost_expr()} WHERE model = :model",
-                    {"model": row["model"], "input": p.input, "output": p.output,
-                     "thinking": p.thinking, "cache_read": p.cache_read,
-                     "cache_write": p.cache_write, "blended": p.codex_blended_rate},
+                    f"UPDATE events SET cost_usd = {_cost_expr()} WHERE model = :model{extra}",
+                    {"model": row["model"], **_price_params(win.price), **wparams},
                 )
-                res.models_priced += 1
-                res.events_priced += row["n"]
+            res.models_priced += 1
+            res.events_priced += row["n"]
         res.cost_after = conn.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM events").fetchone()[0]
     return res
 
 
 def pricing_drift(conn: sqlite3.Connection, pricing: PricingTable, tol: float = 1e-6) -> list[str]:
     """Models whose stored cost no longer matches pricing.json (i.e. `reprice` is due)."""
-    drifted: list[str] = []
-    for row in conn.execute(
+    agg = (
         "SELECT model, SUM(cost_usd) AS stored, COUNT(cost_usd) AS priced_rows, COUNT(*) AS n, "
         "SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, "
         "SUM(thinking_tokens) AS thinking_tokens, SUM(cache_read_tokens) AS cache_read_tokens, "
         "SUM(cache_write_tokens) AS cache_write_tokens, "
         f"SUM(CASE WHEN {_CODEX_BLEND_SQL} THEN input_tokens ELSE 0 END) AS blend_input "
-        "FROM events GROUP BY model"
-    ):
-        hit = pricing.lookup(row["model"])
-        if hit is None:
+        "FROM events"
+    )
+
+    def off(row, price) -> bool:
+        if row["priced_rows"] != row["n"]:
+            return True
+        tokens = {f: row[f] or 0 for f in TOKEN_FIELDS}
+        blend = row["blend_input"] or 0
+        tokens["input_tokens"] -= blend
+        expected = price.cost(**tokens) + blend * price.codex_blended_rate / 1_000_000
+        return abs(expected - (row["stored"] or 0.0)) > tol * max(1.0, expected)
+
+    drifted: list[str] = []
+    for row in conn.execute(f"{agg} GROUP BY model"):
+        windows = pricing.windows(row["model"])
+        if windows is None:
             if row["priced_rows"]:
                 drifted.append(row["model"])
             continue
-        if row["priced_rows"] != row["n"]:
-            drifted.append(row["model"])
+        if len(windows) == 1:
+            if off(row, windows[0].price):
+                drifted.append(row["model"])
             continue
-        tokens = {f: row[f] for f in TOKEN_FIELDS}
-        blend = row["blend_input"] or 0
-        tokens["input_tokens"] -= blend
-        expected = hit[1].cost(**tokens) + blend * hit[1].codex_blended_rate / 1_000_000
-        if abs(expected - (row["stored"] or 0.0)) > tol * max(1.0, expected):
-            drifted.append(row["model"])
+        for win in windows:  # dated prices: every window must match its own price
+            extra, wparams = _window_sql(win)
+            part = conn.execute(f"{agg} WHERE model = :model{extra}",
+                                {"model": row["model"], **wparams}).fetchone()
+            if part["n"] and off(part, win.price):
+                drifted.append(row["model"])
+                break
     return drifted

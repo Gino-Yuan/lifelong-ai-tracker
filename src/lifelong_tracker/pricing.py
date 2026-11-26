@@ -19,6 +19,21 @@ Lookup order for a raw model name:
 
 An explicit entry always wins over the fallbacks: if pricing.json has both
 'gemini-4-neon-high' and 'gemini-4-neon', the '-high' variant uses its own row.
+
+Dated prices (optional). A model entry is either one price object (valid for
+every date, the original format) or a list of price segments, each with an
+`effective_from` ISO date::
+
+    "claude-x": [
+      {"effective_from": "2026-01-01", "input": 2.0, "output": 10.0, ...},
+      {"effective_from": "2026-12-01", "input": 4.0, "output": 20.0, ...}
+    ]
+
+Segments are sorted by date and must not repeat a date; only the first may omit
+`effective_from`. An event is priced by the segment in force on its UTC date
+(the latest segment whose `effective_from` is on or before that day); the first
+segment also covers any day before its own date. Without a date (lookups that
+ask "what does this model cost now?") the latest segment applies.
 """
 
 from __future__ import annotations
@@ -29,8 +44,9 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 PRICE_FIELDS = ("input", "output", "thinking", "cache_read", "cache_write")
 
@@ -110,6 +126,51 @@ class ModelPrice:
         return sum(w * getattr(self, f) for f, w in CODEX_BLEND.items())
 
 
+@dataclass(frozen=True, slots=True)
+class PriceSegment:
+    """One dated price. `effective_from` is None only for an undated first segment."""
+
+    effective_from: date | None
+    price: ModelPrice
+
+
+@dataclass(frozen=True, slots=True)
+class PriceWindow:
+    """The UTC days a segment prices: [lo, hi) as ISO strings; None = unbounded."""
+
+    lo: str | None
+    hi: str | None
+    price: ModelPrice
+
+
+def _as_day(day: date | str) -> date:
+    return day if isinstance(day, date) else date.fromisoformat(str(day)[:10])
+
+
+def price_on(segments: Sequence[PriceSegment], day: date | str | None) -> ModelPrice:
+    """The price in force on `day` (latest segment when `day` is None)."""
+    if day is None or len(segments) == 1:
+        return segments[-1].price
+    d = _as_day(day)
+    current = segments[0].price  # the first segment also covers earlier days
+    for seg in segments[1:]:
+        if seg.effective_from is not None and seg.effective_from <= d:
+            current = seg.price
+        else:
+            break
+    return current
+
+
+def price_windows(segments: Sequence[PriceSegment]) -> list[PriceWindow]:
+    """Non-overlapping UTC-day windows covering every date, one per segment."""
+    out = []
+    for i, seg in enumerate(segments):
+        lo = None if i == 0 else segments[i].effective_from.isoformat()
+        nxt = segments[i + 1].effective_from if i + 1 < len(segments) else None
+        out.append(PriceWindow(lo, None if nxt is None else nxt.isoformat(), seg.price))
+    return out
+
+
 def normalize_model(name: str) -> str:
     text = (name or "").strip().lower()
     if "/" in text:  # 'anthropic/claude-x', 'openrouter/anthropic/claude-x'
@@ -157,9 +218,76 @@ def _is_version_continuation(remainder: str) -> bool:
     return bool(m) and len(m.group(1)) <= 2
 
 
+def _parse_price(where: str, spec: dict) -> ModelPrice:
+    values: dict[str, float] = {}
+    for fld in PRICE_FIELDS:
+        if fld == "thinking" and fld not in spec:
+            continue
+        if fld not in spec:
+            raise ValueError(f"pricing.json: {where} missing {fld!r}")
+        raw = spec[fld]
+        if isinstance(raw, bool):
+            raise ValueError(f"pricing.json: {where}.{fld} must be a number")
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f"pricing.json: {where}.{fld} must be a number") from None
+        if not math.isfinite(val):
+            raise ValueError(f"pricing.json: {where}.{fld} must be a finite number")
+        if val < 0:
+            raise ValueError(f"pricing.json: {where}.{fld} must be >= 0")
+        values[fld] = val
+    values.setdefault("thinking", values["output"])
+    return ModelPrice(**values)
+
+
+def _parse_effective(where: str, value: Any) -> date:
+    if not isinstance(value, str) or not _DATE_ISO.match(value):
+        raise ValueError(f"pricing.json: {where}.effective_from must be a date in YYYY-MM-DD form")
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"pricing.json: {where}.effective_from {value!r} is not a real calendar date") from None
+
+
+def _parse_entry(name: str, spec: Any) -> tuple[PriceSegment, ...]:
+    """One pricing.json model entry -> its segments (a plain object is one undated segment)."""
+    if isinstance(spec, dict):
+        eff = spec.get("effective_from")
+        return (PriceSegment(None if eff is None else _parse_effective(repr(name), eff),
+                             _parse_price(repr(name), spec)),)
+    if not isinstance(spec, list):
+        raise ValueError(f"pricing.json: entry {name!r} must be an object or a list of dated prices")
+    if not spec:
+        raise ValueError(f"pricing.json: entry {name!r} has an empty price list")
+    segments: list[PriceSegment] = []
+    for i, item in enumerate(spec):
+        where = f"{name!r}[{i}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"pricing.json: {where} must be an object")
+        eff = item.get("effective_from")
+        if eff is None and i > 0:
+            raise ValueError(f"pricing.json: {where} needs an effective_from date "
+                             "(only the first price may leave it out)")
+        segments.append(PriceSegment(None if eff is None else _parse_effective(where, eff),
+                                     _parse_price(where, item)))
+    for prev, nxt in zip(segments, segments[1:]):
+        if prev.effective_from is not None and nxt.effective_from <= prev.effective_from:
+            raise ValueError(f"pricing.json: {name!r} effective_from dates must be strictly increasing "
+                             f"({prev.effective_from} then {nxt.effective_from})")
+    return tuple(segments)
+
+
 class PricingTable:
-    def __init__(self, models: dict[str, ModelPrice]):
-        self._models = {normalize_model(k): v for k, v in models.items()}
+    def __init__(self, models: dict[str, ModelPrice | Sequence[PriceSegment]]):
+        self._segments: dict[str, tuple[PriceSegment, ...]] = {}
+        for k, v in models.items():
+            segs = (PriceSegment(None, v),) if isinstance(v, ModelPrice) else tuple(v)
+            if not segs:
+                raise ValueError(f"model {k!r} has no price")
+            self._segments[normalize_model(k)] = segs
+        # the latest price of every model (what an undated lookup returns)
+        self._models = {k: segs[-1].price for k, segs in self._segments.items()}
         # longest keys first so the first boundary-prefix hit is the best one
         self._keys_by_len = sorted(self._models, key=len, reverse=True)
         self._cache: dict[str, tuple[str, ModelPrice] | None] = {}
@@ -175,40 +303,43 @@ class PricingTable:
         models_raw = raw.get("models", {})
         if not isinstance(models_raw, dict):
             raise ValueError("pricing.json: 'models' must be an object")
-        models: dict[str, ModelPrice] = {}
-        for name, spec in models_raw.items():
-            if not isinstance(spec, dict):
-                raise ValueError(f"pricing.json: entry {name!r} must be an object")
-            values: dict[str, float] = {}
-            for fld in PRICE_FIELDS:
-                if fld == "thinking" and fld not in spec:
-                    continue
-                if fld not in spec:
-                    raise ValueError(f"pricing.json: {name!r} missing {fld!r}")
-                val = float(spec[fld])
-                if not math.isfinite(val):
-                    raise ValueError(f"pricing.json: {name!r}.{fld} must be a finite number")
-                if val < 0:
-                    raise ValueError(f"pricing.json: {name!r}.{fld} must be >= 0")
-                values[fld] = val
-            values.setdefault("thinking", values["output"])
-            models[name] = ModelPrice(**values)
-        return cls(models)
+        return cls({name: _parse_entry(name, spec) for name, spec in models_raw.items()})
 
     def __len__(self) -> int:
         return len(self._models)
 
+    @property
+    def has_dated_prices(self) -> bool:
+        return any(len(s) > 1 for s in self._segments.values())
+
     def entries(self) -> list[tuple[str, str, "ModelPrice"]]:
-        """(provider, key, price) for every entry, grouped by PROVIDERS, then by name."""
+        """(provider, key, latest price) for every entry, grouped by PROVIDERS, then by name."""
         rank = {p: i for i, p in enumerate(PROVIDERS)}
         rows = [(provider_of(k), k, v) for k, v in self._models.items()]
         rows.sort(key=lambda r: (rank[r[0]], _natural_key(r[1])))
         return rows
 
+    def segments(self, key: str) -> tuple[PriceSegment, ...]:
+        """Every dated price of a pricing.json key (as returned by `lookup`), oldest first."""
+        return self._segments[normalize_model(key)]
+
     def lookup(self, model: str) -> tuple[str, ModelPrice] | None:
+        """(matched key, latest price) for a ledger model name, or None when unpriced."""
         if model not in self._cache:
             self._cache[model] = self._lookup(model)
         return self._cache[model]
+
+    def lookup_at(self, model: str, day: date | str | None) -> tuple[str, ModelPrice] | None:
+        """Like `lookup`, but the price in force on `day` (an event's UTC date)."""
+        hit = self.lookup(model)
+        if hit is None or day is None:
+            return hit
+        return hit[0], price_on(self._segments[hit[0]], day)
+
+    def windows(self, model: str) -> list[PriceWindow] | None:
+        """The dated price windows that apply to a ledger model name (None when unpriced)."""
+        hit = self.lookup(model)
+        return None if hit is None else price_windows(self._segments[hit[0]])
 
     def _match(self, norm: str) -> tuple[str, ModelPrice] | None:
         if norm in self._models:
@@ -232,8 +363,9 @@ class PricingTable:
         return hit
 
     def cost_for(self, model: str, *, tool: str = "", message_id: str = "",
-                 **tokens: int) -> float | None:
-        hit = self.lookup(model)
+                 day: date | str | None = None, **tokens: int) -> float | None:
+        """USD cost of one event; `day` (its UTC date) picks the dated price in force."""
+        hit = self.lookup_at(model, day)
         if hit is None:
             return None
         price = hit[1]
@@ -331,8 +463,17 @@ def set_model_price(
     if not isinstance(models, dict):
         raise ValueError("pricing.json: 'models' must be an object")
     existing = next((k for k in models if normalize_model(k) == key), None)
-    if existing is not None:
-        models[existing] = values  # keep the original spelling / position
+    if existing is not None and isinstance(models[existing], list) and models[existing]:
+        # dated prices: edit the latest segment in place, keep its date and the history
+        latest = models[existing][-1]
+        eff = latest.get("effective_from") if isinstance(latest, dict) else None
+        models[existing] = [*models[existing][:-1],
+                            values if eff is None else {"effective_from": eff, **values}]
+    elif existing is not None:
+        old = models[existing]
+        eff = old.get("effective_from") if isinstance(old, dict) else None
+        # keep the original spelling / position (and a single segment's date)
+        models[existing] = values if eff is None else {"effective_from": eff, **values}
     else:
         models[key] = values
     if updated is not None:

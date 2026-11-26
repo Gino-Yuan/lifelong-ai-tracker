@@ -840,21 +840,23 @@ def cache_savings(
     """sum(cache_read_tokens / 1e6 * max(0, input_rate - cache_read_rate)) over priced events.
 
     Rates come from the *current* pricing table (the same one Set Price writes), so
-    the figure follows pricing.json even before a reprice.
+    the figure follows pricing.json even before a reprice. With dated prices each
+    event uses the rates in force on its UTC date.
     """
     today = today or date.today()
     where, params = _where(range_name, today, tool, model)
     usd = 0.0
     tokens = events = unpriced = 0
+    day_col = "substr(timestamp, 1, 10)" if pricing.has_dated_prices else "NULL"
     for row in conn.execute(
-        f"SELECT model, COALESCE(SUM(cache_read_tokens), 0) AS cr, "
+        f"SELECT model, {day_col} AS utc_day, COALESCE(SUM(cache_read_tokens), 0) AS cr, "
         f"COALESCE(SUM(CASE WHEN cache_read_tokens > 0 THEN 1 ELSE 0 END), 0) AS ev "
-        f"FROM events {where} GROUP BY model",
+        f"FROM events {where} GROUP BY model, utc_day",
         params,
     ):
         if not row["cr"]:
             continue
-        hit = pricing.lookup(row["model"])
+        hit = pricing.lookup_at(row["model"], row["utc_day"])
         if hit is None:
             unpriced += row["cr"]
             continue

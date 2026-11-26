@@ -196,6 +196,9 @@ button.btn:disabled { opacity: 0.55; cursor: progress; }
 .kpi-plan-unit { font-size: 14px; font-weight: 500; color: var(--muted); letter-spacing: 0; }
 .kpi-plan-multiple { margin-top: 2px; font-size: 15px; font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; }
 .kpi-plan-sub { white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.45; }
+.kpi-plan-split { white-space: normal; overflow: visible; text-overflow: clip; margin-top: 4px; padding-top: 6px;
+  border-top: 1px solid var(--border); color: var(--text-2); font-variant-numeric: tabular-nums; }
+.pricing-table td.model .since { display: block; margin-top: 2px; font-family: var(--font); font-size: 11px; color: var(--muted); }
 
 .card-head {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;

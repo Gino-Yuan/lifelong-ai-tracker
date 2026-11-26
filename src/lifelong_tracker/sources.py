@@ -6,6 +6,12 @@ Config shape (a bare list of sources is also accepted)::
         {"name": "claude-code", "tool": "claude-code", "path": "~/.claude/projects", "enabled": true}
     ]}
 
+Optional `"billing": "subscription" | "api"` (default "subscription") says how a
+source's usage is paid for: under a flat subscription plan (counted in the plan's
+ROI) or pay-as-you-go with an API key (real spend, kept out of the ROI and
+reported as direct API spend). Events are attributed to a source by the folder
+of the log file they were read from.
+
 `~` is expanded; relative paths resolve against the config file's folder. Keys
 starting with `_` are comments; any other unknown key is an error, so a typo such
 as `"enable"` never silently changes behaviour.
@@ -26,7 +32,10 @@ from lifelong_tracker.collectors import COLLECTORS, get_collector
 from lifelong_tracker.pricing import PricingTable
 from lifelong_tracker.sync import SyncReport, sync_source
 
-_ALLOWED_KEYS = {"name", "tool", "path", "enabled"}
+_ALLOWED_KEYS = {"name", "tool", "path", "enabled", "billing"}
+BILLING_SUBSCRIPTION = "subscription"
+BILLING_API = "api"
+BILLING_MODES = (BILLING_SUBSCRIPTION, BILLING_API)
 
 
 class SourcesConfigError(ValueError):
@@ -39,6 +48,7 @@ class SourceSpec:
     tool: str
     path: Path
     enabled: bool = True
+    billing: str = BILLING_SUBSCRIPTION
 
 
 @dataclass
@@ -98,6 +108,9 @@ def load_sources(config_path: Path | str) -> list[SourceSpec]:
         if not isinstance(name, str) or not name.strip():
             raise SourcesConfigError(f"{where}: 'name' must be a non-empty string")
         name = name.strip()
+        billing = item.get("billing", BILLING_SUBSCRIPTION)
+        if billing not in BILLING_MODES:
+            raise SourcesConfigError(f"{where}: 'billing' must be \"subscription\" or \"api\"")
         if name in seen:
             raise SourcesConfigError(f"{where}: duplicate name {name!r} (give each source a unique 'name')")
         seen.add(name)
@@ -105,7 +118,7 @@ def load_sources(config_path: Path | str) -> list[SourceSpec]:
         p = Path(raw_path.strip()).expanduser()
         if not p.is_absolute():
             p = base / p
-        specs.append(SourceSpec(name=name, tool=tool, path=p, enabled=enabled))
+        specs.append(SourceSpec(name=name, tool=tool, path=p, enabled=enabled, billing=billing))
     return specs
 
 

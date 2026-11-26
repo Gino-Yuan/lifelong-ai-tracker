@@ -534,7 +534,7 @@
         (cs.unpriced_cache_read_tokens ? ` · ${fmtCompact(cs.unpriced_cache_read_tokens)} unpriced` : "")
       : cs.unpriced_cache_read_tokens ? `${fmtCompact(cs.unpriced_cache_read_tokens)} cache reads are unpriced`
         : "No cache reads in this range";
-    renderRoi(ov.subscription, ov.subscription_error);
+    renderRoi(ov.subscription, ov.subscription_error, ov.billing);
     renderRecords(ov.records);
     const s = ov.streak;
     $("kpi-streak").textContent = plural(s.current, "day");
@@ -603,7 +603,30 @@
     const net = sub.value_usd - sub.plan_cost_usd;
     return net >= 0 ? `Saved ${fmtUsd(net)}` : `Net loss ${fmtUsd(-net)}`;
   }
-  function renderRoi(sub, error) {
+  // With sources marked "billing": "api", their pay-as-you-go spend is shown apart
+  // ("Direct API") and kept out of the plan's value multiple ("Subscription").
+  function billingSplit(sub, billing) {
+    const split = $("kpi-roi-split");
+    if (!billing) {
+      split.hidden = true;
+      split.textContent = "";
+      return "";
+    }
+    const subValue = sub ? sub.value_usd : 0;
+    split.hidden = false;
+    split.textContent = `Subscription: ${fmtUsd(subValue)} · Direct API: ${fmtUsd(billing.api_direct_spend_usd)}`;
+    const lines = [
+      "",
+      `Subscription: ${fmtUsd(subValue)} API-equivalent value used under plans (counts toward ROI)`,
+      `Direct API: ${fmtUsd(billing.api_direct_spend_usd)} billed per token by ${plural(billing.api_sources, "API source")} (not in ROI)`,
+      ...billing.tools.map((t) => `  ${t.label}: ${fmtUsd(t.api_spend_usd)} · ${plural(t.events, "request")}`),
+    ];
+    if (billing.api_unpriced_events) lines.push(`${fmtInt(billing.api_unpriced_events)} unpriced API requests are not counted`);
+    if (sub) lines.push(`Out of pocket: ${fmtUsd(sub.plan_cost_usd)} plans + ${fmtUsd(billing.api_direct_spend_usd)} API = ` +
+      fmtUsd(sub.plan_cost_usd + billing.api_direct_spend_usd));
+    return lines.join("\n");
+  }
+  function renderRoi(sub, error, billing) {
     const card = $("kpi-roi-card");
     const unit = $("kpi-roi-unit");
     if (error) {
@@ -612,12 +635,21 @@
       unit.hidden = true;
       $("kpi-roi").textContent = "–";
       $("kpi-roi-sub").textContent = `subscriptions.json: ${error}`;
-      card.title = "";
+      card.title = billingSplit(null, billing).trim();
       return;
     }
-    card.hidden = !sub;
-    if (!sub) return;
+    card.hidden = !sub && !billing;
+    if (!sub && !billing) { billingSplit(null, null); return; }
     unit.hidden = false;
+    if (!sub) { // API-only: nothing to divide by, so no multiple
+      $("kpi-roi-spent").textContent = fmtUsd(billing.api_direct_spend_usd);
+      unit.textContent = "direct API";
+      $("kpi-roi").textContent = "Pay as you go";
+      $("kpi-roi-sub").textContent = "No subscription plan in subscriptions.json";
+      card.title = billingSplit(null, billing).trim();
+      return;
+    }
+    unit.textContent = "spent";
     $("kpi-roi-spent").textContent = fmtUsd(sub.plan_cost_usd);
     if (sub.multiple == null) { // paid plans exist, but none covers a day of this range
       $("kpi-roi").textContent = "–";
@@ -625,11 +657,12 @@
     } else {
       $("kpi-roi").textContent = `${fmtMultiple(sub.multiple)} value`;
       $("kpi-roi-sub").textContent =
-        `${fmtUsd(sub.value_usd)} API value · ${planNet(sub)} · ${plural(sub.days, "day")}`;
+        `${fmtUsd(sub.value_usd)} ${billing ? "plan" : "API"} value · ${planNet(sub)} · ${plural(sub.days, "day")}`;
     }
     card.title = sub.tools.map((x) => `${x.label}: ${x.monthly_usd > 0 ? fmtUsd(x.monthly_usd) + "/mo" : "no active plan"}` +
       ` · ${plural(x.paid_days, "paid day")} · ${fmtUsd(x.plan_cost_usd)} plan · ${fmtUsd(x.value_usd)} value`).join("\n") +
-      (sub.unpriced_events ? `\n${fmtInt(sub.unpriced_events)} unpriced requests are not counted` : "");
+      (sub.unpriced_events ? `\n${fmtInt(sub.unpriced_events)} unpriced requests are not counted` : "") +
+      billingSplit(sub, billing);
   }
 
   const fmtDayShort = (iso) => fmtDay(iso, { month: "short", day: "numeric", year: "numeric" });
@@ -1148,6 +1181,7 @@
         (rp ? ` · total ${fmtUsd(rp.cost_before)} → ${fmtUsd(rp.cost_after)}` : ""));
       if (pricingOpen()) {
         pricing.flash = body.model;
+        pricing.keep = body.model; // stays listed under Used only even before it is used
         loadPricing();
       }
       loadTools();
@@ -1166,7 +1200,9 @@
   // ------------------------------------------------------------------ pricing table
   const pdlg = $("pricing-dialog");
   const PROVIDER_ORDER = ["Claude", "Gemini", "GPT", "Other"];
-  const pricing = { data: null, provider: "", q: "", seq: 0, flash: null, tab: "models" };
+  // usedOnly (default on): list only price rows the ledger has used. `keep` is a model
+  // just added / edited here, shown even when unused until the dialog closes.
+  const pricing = { data: null, provider: "", q: "", seq: 0, flash: null, tab: "models", usedOnly: true, keep: null };
   const pricingOpen = () => pdlg.open || pdlg.hasAttribute("open");
 
   function fmtPrice(v) {
@@ -1190,25 +1226,44 @@
     }
   }
 
+  const pricingVisible = (m) => !pricing.usedOnly || m.used === true || m.model === pricing.keep;
   function pricingRows() {
     const models = (pricing.data && pricing.data.models) || [];
     const q = pricing.q.trim().toLowerCase();
-    return models.filter((m) =>
+    return models.filter((m) => pricingVisible(m) &&
       (!pricing.provider || m.provider === pricing.provider) &&
       (!q || m.model.toLowerCase().includes(q)));
+  }
+
+  const fmtDayLong = (iso) => fmtDay(iso, { month: "short", day: "numeric", year: "numeric" });
+  function priceHistoryTitle(m) {
+    const rows = (m.history || []).map((s) =>
+      `${s.effective_from ? "From " + fmtDayLong(s.effective_from) : "Before " + fmtDayLong(m.effective_from)}: ` +
+      `input ${fmtPrice(s.input)} · output ${fmtPrice(s.output)} · cache read ${fmtPrice(s.cache_read)}`);
+    return [`Current price since ${fmtDayLong(m.effective_from)}`, ...rows].join("\n");
   }
 
   function renderPricing() {
     const d = pricing.data;
     if (!d) return;
     $("pricing-unit").textContent = d.unit_label || "USD per 1M tokens";
-    $("pricing-updated").textContent = d.updated ? fmtDay(d.updated, { month: "short", day: "numeric", year: "numeric" }) : "—";
-    $("pricing-count").textContent = plural(d.count, "model");
+    $("pricing-updated").textContent = d.updated ? fmtDayLong(d.updated) : "—";
+    const usedCount = d.used_count || 0;
+    $("pricing-count").textContent = pricing.usedOnly
+      ? `${fmtInt(usedCount)} used of ${plural(d.count, "model")}` : plural(d.count, "model");
+    $("pricing-used").checked = pricing.usedOnly;
 
-    const counts = Object.fromEntries((d.providers || []).map((p) => [p.provider, p.count]));
+    // provider counts follow the Used only switch
+    const counts = {};
+    let shown = 0;
+    for (const m of d.models || []) {
+      if (!pricingVisible(m)) continue;
+      counts[m.provider] = (counts[m.provider] || 0) + 1;
+      shown += 1;
+    }
     for (const b of $("pricing-provider").querySelectorAll("button")) {
       const p = b.dataset.provider;
-      const n = p ? counts[p] || 0 : d.count;
+      const n = p ? counts[p] || 0 : shown;
       if (p === "Other") b.hidden = n === 0 && pricing.provider !== "Other";
       b.setAttribute("aria-pressed", String(p === pricing.provider));
       b.replaceChildren(p || "All", h("span", { class: "count", text: String(n) }));
@@ -1230,17 +1285,26 @@
         type: "button", class: "btn btn-xs", text: "Edit", "aria-label": `Edit price of ${m.model}`,
       });
       edit.addEventListener("click", () => openPriceDialog(m.model, null, { mode: "edit", prefill: m }));
+      const name = h("td", { class: "model", text: m.model });
+      if (m.effective_from) { // dated prices: say since when the shown price applies
+        name.append(h("span", { class: "since", text: `since ${fmtDayLong(m.effective_from)}` +
+          ((m.history || []).length ? ` · ${plural(m.history.length + 1, "price period")}` : "") }));
+        name.title = priceHistoryTitle(m);
+      }
       const tr = h("tr", { "data-model": m.model, class: m.model === pricing.flash ? "flash" : null },
-        h("td", { class: "model", text: m.model }), ...cells, h("td", { class: "act" }, edit));
+        name, ...cells, h("td", { class: "act" }, edit));
       out.push(tr);
     }
     body.replaceChildren(...out);
     const empty = $("pricing-empty");
     empty.hidden = rows.length > 0;
     if (!rows.length) {
+      const hiddenNote = pricing.usedOnly && d.count ? " Turn off Used only to see every model." : "";
       empty.textContent = pricing.q.trim()
-        ? `No models match “${pricing.q.trim()}”.`
-        : "No models in pricing.json yet — use + Add Model.";
+        ? `No ${pricing.usedOnly ? "used " : ""}models match “${pricing.q.trim()}”.${hiddenNote}`
+        : !d.count ? "No models in pricing.json yet — use + Add Model."
+        : pricing.provider ? `No used ${pricing.provider} models yet.${hiddenNote}`
+        : `No priced model has been used yet.${hiddenNote}`;
     }
     if (pricing.flash) {
       const hit = body.querySelector("tr.flash");
@@ -1513,7 +1577,9 @@
   function closePricing() {
     if (typeof pdlg.close === "function") pdlg.close();
     else pdlg.removeAttribute("open");
+    pricing.keep = null;
   }
+  pdlg.addEventListener("close", () => { pricing.keep = null; }); // Esc closes natively
 
   $("open-pricing").addEventListener("click", () => openPricing());
   $("pricing-tabs").addEventListener("click", (e) => {
@@ -1532,6 +1598,11 @@
   $("pricing-add").addEventListener("click", () => openPriceDialog("", null, { mode: "add" }));
   $("pricing-search").addEventListener("input", (e) => {
     pricing.q = e.target.value;
+    renderPricing();
+  });
+  $("pricing-used").checked = pricing.usedOnly;
+  $("pricing-used").addEventListener("change", (e) => {
+    pricing.usedOnly = !!e.target.checked;
     renderPricing();
   });
   $("pricing-provider").addEventListener("click", (e) => {

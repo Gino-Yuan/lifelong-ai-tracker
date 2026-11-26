@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -19,19 +20,40 @@ CLAUDE_FIXTURES = FIXTURES / "claude_code"
 TEST_PRICING = FIXTURES / "pricing_test.json"
 CANARY = "FAKE_CONTENT_CANARY_7f3a"
 
+# The browser-side tests run the real app.js under JavaScriptCore's `jsc` shell. It ships
+# with macOS; elsewhere it is found on PATH if installed, otherwise those tests are skipped.
+_MACOS_JSC = Path("/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc")
+
+
+def _find_jsc() -> Path | None:
+    if sys.platform == "darwin" and _MACOS_JSC.is_file():
+        return _MACOS_JSC
+    found = shutil.which("jsc")
+    return Path(found) if found else None
+
+
+JSC = _find_jsc()
+requires_jsc = pytest.mark.skipif(JSC is None, reason="JavaScriptCore `jsc` shell not available (macOS only by default)")
+
 
 @pytest.fixture(autouse=True, scope="session")
 def _utc_local_time():
-    """Pin the process timezone so local-day / local-hour buckets are deterministic."""
+    """Pin the process timezone so local-day / local-hour buckets are deterministic.
+
+    time.tzset() exists only on Unix; on Windows the TZ variable is still set (SQLite and
+    CI runners there use UTC by default).
+    """
     previous = os.environ.get("TZ")
     os.environ["TZ"] = "UTC"
-    time.tzset()
+    if hasattr(time, "tzset"):
+        time.tzset()
     yield
     if previous is None:
         os.environ.pop("TZ", None)
     else:
         os.environ["TZ"] = previous
-    time.tzset()
+    if hasattr(time, "tzset"):
+        time.tzset()
 
 
 @pytest.fixture

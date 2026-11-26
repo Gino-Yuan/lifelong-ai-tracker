@@ -318,7 +318,7 @@ def test_schedule_render_writes_valid_plist_and_prints_commands(tmp_path, sched_
     out = tmp_path / "deploy" / "com.lifelong-tracker.sync.plist"
     log = tmp_path / "logs" / "sync.log"
     bk = tmp_path / "backups"
-    r = _invoke("schedule", "render", "--config", sched_cfg, "--out", out, "--hour", 6, "--minute", 5,
+    r = _invoke("schedule", "render", "--platform", "macos", "--config", sched_cfg, "--out", out, "--hour", 6, "--minute", 5,
                 "--db", db_path, "--pricing", TEST_PRICING, "--log-file", log, "--backup-dir", bk, "--keep", 7)
     assert r.exit_code == 0, r.output
 
@@ -327,7 +327,7 @@ def test_schedule_render_writes_valid_plist_and_prints_commands(tmp_path, sched_
     plist = plistlib.loads(raw)
     assert plist["Label"] == "com.lifelong-tracker.sync"
     args = plist["ProgramArguments"]
-    assert args[0] == str(DEFAULT_TRACKER_BIN) and args[0].endswith(".venv/bin/tracker")
+    assert args[0] == str(DEFAULT_TRACKER_BIN) and Path(args[0]).parts[-3:] == (".venv", "bin", "tracker")
     assert args[1] == "sync-all"
     assert args[args.index("--config") + 1] == str(sched_cfg.resolve())
     assert args[args.index("--db") + 1] == str(db_path.resolve())
@@ -352,7 +352,7 @@ def test_schedule_render_writes_valid_plist_and_prints_commands(tmp_path, sched_
 
 def test_schedule_render_no_backup_and_defaults(tmp_path, sched_cfg):
     out = tmp_path / "x" / "com.lifelong-tracker.sync.plist"
-    r = _invoke("schedule", "render", "--config", sched_cfg, "--out", out, "--no-backup",
+    r = _invoke("schedule", "render", "--platform", "macos", "--config", sched_cfg, "--out", out, "--no-backup",
                 "--log-file", tmp_path / "l" / "sync.log")
     assert r.exit_code == 0, r.output
     plist = plistlib.loads(out.read_bytes())
