@@ -16,7 +16,7 @@ Three guarantees:
 ## Quick Start
 
 ```bash
-git clone <this-repo-url> lifelong-ai-tracker
+git clone https://github.com/Gino-Yuan/lifelong-ai-tracker.git lifelong-ai-tracker
 cd lifelong-ai-tracker
 python3 -m venv .venv
 .venv/bin/pip install -e .
